@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -125,10 +126,12 @@ var (
 
 // vcpu collects a VCPU fd and its mmaped state.
 type vcpu struct {
-	fd    *kvm.VCPU
-	mm    []byte
-	opC   chan vcpuOp
-	doneC chan struct{}
+	fd       *kvm.VCPU
+	mm       []byte
+	opC      chan vcpuOp
+	shutdown chan struct{}
+	doneC    chan struct{}
+	tid      int32
 }
 
 // vcpuOp is an operation to be performed on a vcpu thread.
@@ -137,8 +140,20 @@ type vcpuOp struct {
 	C chan error
 }
 
+func vmLogf(m *VM, phase, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "kube-vm: vmm vm=%p: %s: %s\n", m, phase, msg)
+}
+
 func init() {
-	signal.Ignore(unix.SIGURG)
+	// SIGURG is used to interrupt KVM_RUN on specific VCPU threads during teardown.
+	// It must be actively handled (not ignored) for tgkill(SIGURG) to unblock ioctls.
+	sigC := make(chan os.Signal, 16)
+	signal.Notify(sigC, unix.SIGURG)
+	go func() {
+		for range sigC {
+		}
+	}()
 }
 
 // New creates a new VM.
@@ -214,23 +229,31 @@ func New(cfg Config) (*VM, error) {
 	cpu := make([]*vcpu, cfg.NumCPU)
 	for slot := range cpu {
 		c := &vcpu{
-			opC:   make(chan vcpuOp),
-			doneC: make(chan struct{}),
+			opC:      make(chan vcpuOp),
+			shutdown: make(chan struct{}),
+			doneC:    make(chan struct{}),
 		}
 
 		go func() {
 			defer close(c.doneC)
 			runtime.LockOSThread()
-			for op := range c.opC {
-				op.C <- op.F()
-			}
-
-			if c.fd != nil {
-				c.fd.Close()
-			}
-
-			if c.mm != nil {
-				unix.Munmap(c.mm)
+			atomic.StoreInt32(&c.tid, int32(unix.Gettid()))
+			for {
+				select {
+				case <-c.shutdown:
+					if c.fd != nil {
+						_ = c.fd.Close()
+					}
+					return
+				case op, ok := <-c.opC:
+					if !ok {
+						if c.fd != nil {
+							_ = c.fd.Close()
+						}
+						return
+					}
+					op.C <- op.F()
+				}
 			}
 		}()
 
@@ -367,8 +390,10 @@ func New(cfg Config) (*VM, error) {
 }
 
 func (m *VM) Run(ctx context.Context) error {
+	vmLogf(m, "run", "enter")
 	select {
 	case <-m.doneC:
+		vmLogf(m, "run", "already closed before start")
 		return ErrVMClosed
 
 	default:
@@ -376,17 +401,19 @@ func (m *VM) Run(ctx context.Context) error {
 	}
 
 	requestExit := func() {
-		for _, c := range m.cpu {
-			c.State().ImmediateExit = 1
-		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.requestExitLocked()
 	}
 
 	go func() {
 		select {
 		case <-m.doneC:
+			vmLogf(m, "run", "done channel closed; requesting immediate exit")
 			requestExit()
 
 		case <-ctx.Done():
+			vmLogf(m, "run", "context canceled; requesting immediate exit")
 			requestExit()
 		}
 	}()
@@ -398,18 +425,34 @@ func (m *VM) Run(ctx context.Context) error {
 
 	runVCPU := func(slot int, c *vcpu) error {
 		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			select {
+			case <-c.shutdown:
+				return ErrVMClosed
+			default:
+			}
+
 			if err := kvm.Run(c.fd); err != nil {
 				if err == unix.EINTR || err == unix.EAGAIN {
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-
-					if err == unix.EAGAIN && slot != 0 {
-						// APs can transiently report EAGAIN while waiting to run.
-						time.Sleep(time.Millisecond)
+					if isShutdown(c.shutdown) {
+						return ErrVMClosed
 					}
 
+					// EAGAIN can happen during shutdown or while a VCPU is briefly idle.
+					time.Sleep(time.Millisecond)
 					continue
+				}
+
+				if err == unix.EBADF || err == unix.EINVAL {
+					if isShutdown(c.shutdown) {
+						return ErrVMClosed
+					}
 				}
 
 				return fmt.Errorf("run vcpu: %w", err)
@@ -419,17 +462,23 @@ func (m *VM) Run(ctx context.Context) error {
 
 			switch state.ExitReason {
 			case kvm.ExitIO:
-				continue
-
-			case kvm.ExitHLT:
-				if slot != 0 {
-					// APs can idle in HLT while waiting for interrupts.
-					// Yield to avoid a tight userspace run/exit loop.
-					time.Sleep(time.Millisecond)
+				if err := ctx.Err(); err != nil {
+					return err
 				}
 				continue
 
+			case kvm.ExitHLT:
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				// Both BSP and APs can otherwise spin hard in HLT exit loops.
+				time.Sleep(time.Millisecond)
+				continue
+
 			case kvm.ExitAPResetHold:
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				// APs can sit in reset-hold until the BSP sends INIT/SIPI.
 				// Avoid a tight userspace spin while waiting.
 				time.Sleep(time.Millisecond)
@@ -439,6 +488,9 @@ func (m *VM) Run(ctx context.Context) error {
 				xd := state.MMIOExitData()
 				if _, err := m.mmio.HandleMMIO(xd.PhysAddr, xd.Data[:xd.Len], xd.IsWrite); err != nil {
 					return fmt.Errorf("vcpu mmio: %w", err)
+				}
+				if err := ctx.Err(); err != nil {
+					return err
 				}
 
 			case kvm.ExitShutdown:
@@ -461,6 +513,7 @@ func (m *VM) Run(ctx context.Context) error {
 
 	for {
 		res := <-errC
+		vmLogf(m, "run", "vcpu %d returned err=%v", res.slot, res.err)
 
 		if res.slot != 0 {
 			if res.err != nil && !errors.Is(res.err, context.Canceled) {
@@ -474,13 +527,16 @@ func (m *VM) Run(ctx context.Context) error {
 		requestExit()
 
 		if res.err != nil && !errors.Is(res.err, context.Canceled) {
+			vmLogf(m, "run", "bsp exit with error: %v", res.err)
 			return res.err
 		}
 
 		if ctx.Err() != nil {
+			vmLogf(m, "run", "exiting due to context cancel: %v", ctx.Err())
 			return ctx.Err()
 		}
 
+		vmLogf(m, "run", "clean exit")
 		return nil
 	}
 }
@@ -490,47 +546,186 @@ func (m *VM) Run(ctx context.Context) error {
 // it closes the MMIO bus, which closes each of its devices in turn. Then the
 // underlying VM fd is closed and the VM's memory is munmaped.
 func (m *VM) Close() error {
+	vmLogf(m, "close", "begin")
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	select {
 	case <-m.doneC:
+		m.mu.Unlock()
+		vmLogf(m, "close", "already closed")
 		return ErrVMClosed
-
 	default:
+		m.requestExitLocked()
 		close(m.doneC)
+		vmLogf(m, "close", "signaled immediate exit and closed done channel")
+	}
+	m.mu.Unlock()
+
+	var (
+		firstErr error
+		hasErr   bool
+	)
+
+	if m.fd != nil {
+		vmLogf(m, "close", "closing vm fd early")
+		if err := m.fd.Close(); err != nil {
+			if !hasErr {
+				firstErr = fmt.Errorf("close vm fd: %w", err)
+				hasErr = true
+			}
+		}
+		m.fd = nil
 	}
 
-	// wait for the vcpus
 	for _, c := range m.cpu {
-		close(c.opC)
-		<-c.doneC
+		if c == nil {
+			continue
+		}
+		close(c.shutdown)
+		vmLogf(m, "close", "signaled shutdown for vcpu tid=%d", atomic.LoadInt32(&c.tid))
+		if tid := int(atomic.LoadInt32(&c.tid)); tid > 0 {
+			_ = unix.Tgkill(unix.Getpid(), tid, unix.SIGURG)
+		}
+		// Force KVM_RUN to unblock even if the VCPU worker is still inside op.F.
+		if c.fd != nil {
+			if err := c.fd.Close(); err != nil {
+				if !hasErr {
+					firstErr = fmt.Errorf("close vcpu fd: %w", err)
+					hasErr = true
+				}
+			}
+			c.fd = nil
+		}
 	}
 
-	if err := m.mmio.Close(); err != nil {
-		return fmt.Errorf("close mmio: %w", err)
+	for i, c := range m.cpu {
+		if c == nil {
+			continue
+		}
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case <-c.doneC:
+				vmLogf(m, "close", "vcpu %d worker exited", i)
+				goto vcpuClosed
+			case <-time.After(100 * time.Millisecond):
+				if tid := int(atomic.LoadInt32(&c.tid)); tid > 0 {
+					_ = unix.Tgkill(unix.Getpid(), tid, unix.SIGURG)
+				}
+			case <-deadline:
+				vmLogf(m, "close", "timeout waiting for vcpu %d worker exit", i)
+				if !hasErr {
+					firstErr = fmt.Errorf("timeout waiting for vcpu %d shutdown", i)
+					hasErr = true
+				}
+				goto vcpuClosed
+			}
+		}
+	vcpuClosed:
+		if c.mm != nil {
+			if err := unix.Munmap(c.mm); err != nil {
+				if !hasErr {
+					firstErr = fmt.Errorf("unmap vcpu memory: %w", err)
+					hasErr = true
+				}
+			}
+			c.mm = nil
+		}
 	}
 
-	if err := m.fd.Close(); err != nil {
-		return fmt.Errorf("close vm fd: %w", err)
+	if m.fd != nil {
+		vmLogf(m, "close", "closing vm fd")
+		if err := m.fd.Close(); err != nil {
+			if !hasErr {
+				firstErr = fmt.Errorf("close vm fd: %w", err)
+				hasErr = true
+			}
+		}
+		m.fd = nil
 	}
 
-	if err := unix.Munmap(m.mem); err != nil {
-		return fmt.Errorf("unmap memory: %w", err)
+	for _, fd := range m.irqf {
+		if fd > 0 {
+			_ = unix.Close(int(fd))
+		}
+	}
+	m.irqf = nil
+	vmLogf(m, "close", "closed irqfds")
+
+	if m.mmio != nil {
+		vmLogf(m, "close", "closing mmio bus")
+		if err := m.mmio.Close(); err != nil {
+			if !hasErr {
+				firstErr = fmt.Errorf("close mmio: %w", err)
+				hasErr = true
+			}
+		}
 	}
 
+	if m.mem != nil {
+		vmLogf(m, "close", "unmapping guest memory")
+		if err := unix.Munmap(m.mem); err != nil {
+			if !hasErr {
+				firstErr = fmt.Errorf("unmap memory: %w", err)
+				hasErr = true
+			}
+		}
+		m.mem = nil
+	}
+
+	if firstErr != nil {
+		vmLogf(m, "close", "complete with error: %v", firstErr)
+		return firstErr
+	}
+	vmLogf(m, "close", "complete")
 	return nil
 }
 
+func isShutdown(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *VM) requestExitLocked() {
+	for _, c := range m.cpu {
+		if c == nil || c.mm == nil {
+			continue
+		}
+		c.State().ImmediateExit = 1
+	}
+}
+
 func (c *vcpu) State() *kvm.VCPUState {
+	if c == nil || c.mm == nil {
+		return nil
+	}
 	return (*kvm.VCPUState)(unsafe.Pointer(&c.mm[0]))
 }
 
 // Do runs f on the VCPU's thread and returns its result. Calls are serialized.
 func (c *vcpu) Do(f func() error) error {
-	op := vcpuOp{f, make(chan error)}
-	c.opC <- op
-	return <-op.C
+	select {
+	case <-c.shutdown:
+		return ErrVMClosed
+	default:
+	}
+
+	op := vcpuOp{f, make(chan error, 1)}
+	select {
+	case <-c.shutdown:
+		return ErrVMClosed
+	case c.opC <- op:
+	}
+
+	select {
+	case <-c.shutdown:
+		return ErrVMClosed
+	case err := <-op.C:
+		return err
+	}
 }
 
 func (cfg Config) validate() error {

@@ -1,0 +1,6 @@
+sessionname kube-vm-test
+mousetrack on
+screen 0 ./kube-vm
+split
+focus down
+screen 1 bash
