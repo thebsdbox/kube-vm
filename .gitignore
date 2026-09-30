@@ -1,2 +1,5 @@
 kube-vm
+kube-vmctl
+disk.img
+kube-vm-disk.img
 kubevmctl

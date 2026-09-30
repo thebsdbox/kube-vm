@@ -1,163 +1,266 @@
-Hype is a collection of Go packages related to the Linux Kernel Virtual Machine (KVM). The long-term goal is to learn more about Linux internals, KVM, and virtio. The short-term goal is to boot a Linux guest with a virtio console, block storage, and network access on an amd64 Linux host.
+# kube-vm
 
-[![Go reference](https://pkg.go.dev/badge/kube-vm.svg)](https://pkg.go.dev/kube-vm)
+kube-vm is a Linux KVM-based VM runner written in Go. It supports:
 
-- Package [`kvm`](https://pkg.go.dev/kube-vm/kvm) provides wrappers for some KVM ioctls (without cgo)
-- Package [`vmm`](https://pkg.go.dev/kube-vm/vmm) provides helpers for configuring and running a VM
-- Package [`os/linux`](https://pkg.go.dev/kube-vm/os/linux) provides a VM loader that boots a 64-bit bzImage in long mode
-- Package [`virtio`](https://pkg.go.dev/kube-vm/virtio) implements parts of the virtio 1.2 spec (basic console, block only)
+- direct local VM boot
+- daemon mode with a Unix socket control API
+- a CLI client (`kube-vmctl`)
+- an optional web frontend/API with token auth
+- virtio console, block, and network devices
+- detached VM start and later console attach
 
-## Booting a VM
+## Requirements
 
-This example boots Linux with an Alpine-based initrd. A virtio console is connected to stdin and stdout. The kernel is configured to run `/sbin/reboot -f` instead of a normal init, which causes the VM to exit as soon as it boots. If you want to run this example yourself, follow the instructions in "Building the guest kernel and initrd" below. Then `go run ./cmd/readme-example`.
+- Linux amd64 host
+- `/dev/kvm` available
+- Go 1.24+
+- for TAP networking: permissions to create/use TAP interfaces
+- for `build-disk`: Docker + loop mount permissions (`sudo`)
 
-If you remove `rdinit=/sbin/reboot -- -f` from the loader cmdline, the guest will run an init shell in a tty instead of just rebooting.
-
-```go
-package main
-
-import (
-	"context"
-	"os"
-
-	"kube-vm/os/linux"
-	"kube-vm/virtio"
-	"kube-vm/vmm"
-	"golang.org/x/term"
-)
-
-func main() {
-	bzImage, err := os.ReadFile(".build/linux/guest/arch/x86/boot/bzImage")
-	if err != nil {
-		panic(err)
-	}
-
-	initrd, err := os.ReadFile(".build/initrd.cpio.gz")
-	if err != nil {
-		panic(err)
-	}
-
-	cfg := vmm.Config{
-		Devices: []virtio.DeviceConfig{
-			&virtio.ConsoleDevice{
-				In:  os.Stdin,
-				Out: os.Stdout,
-			},
-		},
-
-		Loader: &linux.Loader{
-			Kernel:  bzImage,
-			Initrd:  initrd,
-			Cmdline: "reboot=t console=hvc0 rdinit=/sbin/reboot -- -f",
-		},
-	}
-
-	m, err := vmm.New(cfg)
-	if err != nil {
-		panic(err)
-	}
-
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		old, err := term.MakeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			panic(err)
-		}
-
-		defer term.Restore(int(os.Stdin.Fd()), old)
-	}
-
-	if err := m.Run(context.TODO()); err != nil {
-		panic(err)
-	}
-}
-```
-
-![an animation showing the output of the example code](doc/readme.gif)
-
-### Block devices
-
-Any number of block devices can be configured. Block storage is pluggable, so a device can be backed by memory, a sparse file, an HTTP URL, or any other type implementing the `virtio.BlockStorage` interface.
-
-Here's how to configure the builtin block storage backends:
-
-```go
-f, err := os.OpenFile("blk.raw", os.O_RDWR, 0)
-if err != nil {
-	panic(err)
-}
-
-cfg := vmm.Config{
-	Devices: []virtio.DeviceConfig{
-		&virtio.BlockDevice{
-			Storage: &virtio.MemStorage{
-				Bytes: make([]byte, 0x1000),
-			},
-		},
-
-		&virtio.BlockDevice{
-			Storage: &virtio.FileStorage{
-				File: f,
-			},
-		},
-
-		&virtio.BlockDevice{
-			Storage: &virtio.HTTPStorage{
-				URL: "https://cdn.c35s.co/ubuntu-amd64.squashfs",
-			},
-		},
-
-		// ...
-	},
-}
-```
-
-Use something like `truncate -s 1G blk.raw` to create a local sparse file.
-
-### Network devices
-
-The CLI can attach a virtio-net device backed by a host TAP interface:
+## Build
 
 ```sh
-go run . -kernel .build/linux/guest/arch/x86/boot/bzImage -initrd .build/initrd.cpio.gz -tap tap0
+make build
 ```
 
-If the TAP name does not exist, Hype creates it via `/dev/net/tun`.
+This creates:
 
-## Reference
+- `./kube-vm`
+- `./kube-vmctl`
 
-- https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
-- https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/arch/x86/include/uapi/asm/bootparam.h
-- https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/arch/x86/include/uapi/asm/kvm.h
-- https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/kvm.h
-- https://wiki.osdev.org/Entering_Long_Mode_Directly
-- https://wiki.osdev.org/Memory_Map_(x86)
-- https://wiki.osdev.org/Setting_Up_Paging
-- https://wiki.osdev.org/X86-64
-- https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt
-- https://www.kernel.org/doc/Documentation/x86/boot.txt
-- https://www.kernel.org/doc/Documentation/x86/zero-page.rst
+## Make Targets
 
-## Development
+- `make build`: build daemon and client
+- `make build-vm`: build `kube-vm`
+- `make build-client`: build `kube-vmctl`
+- `make clean`: remove binaries
+- `make demo`: start demo screen session from `kube-vm-screen.rc`
+- `make exit-demo`: stop demo screen session
+- `make build-disk DOCKER_TAG=<image>`: create ext4 disk image from Docker image contents
 
-You will need an amd64 Linux environment with:
+`build-disk` variables:
 
-- Linux kernel dev dependencies (to build the guest kernel)
-- Docker (to build the debug initrd)
-- Go 1.21.1 or better
+- `DOCKER_TAG` required
+- `DOCKERFILE` optional (if set, image is built first)
+- `DISK_IMG` default `kube-vm-disk.img`
+- `MOUNT_DIR` default `/mnt`
 
-### Building the guest kernel and debug initrd
+Example:
 
-Hype includes a guest Linux kernel configuration for tests and and debugging. To build it, first make sure the `lib/linux` submodule is cloned by running `git submodule update --init`. It's gonna take a minute. After the submodule is cloned, run `make -j $(nproc) guest` to build the guest kernel and the debug initrd. The kernel build config is copied from `etc/linux/guest`. To edit the config, run `make menuconfig-guest`.
-
-The debug initrd is built from `etc/initrd/Dockerfile`. It starts with the alpine base image and adds an init shim that mounts a few helpful things like `/dev` before executing `/bin/sh` in a tty. Try it for manual debugging and/or good old-fashioned pokin' around.
-
-```
-# this will connect your terminal to a shell in the vm
-go run . -kernel .build/linux/guest/arch/x86/boot/bzImage -initrd .build/initrd.cpio.gz
+```sh
+make build-disk DOCKER_TAG=my-rootfs DOCKERFILE=./Dockerfile DISK_IMG=guest.img
 ```
 
-Your shell is PID 1, so the kernel will get very angry if you exit. Use `reboot -f` instead.
+## Running kube-vm Directly
 
-### Panics
+Local mode (no daemon) example:
 
-To remove a panic, write a test that causes it, then change the code to return an annotated error, write to the log, or otherwise handle the condition instead of panicking. Simply returning the original error usually isn't useful.
+```sh
+./kube-vm -server=false \
+  -kernel ./bzImage \
+  -initrd ./initrd.cpio.gz \
+  -cmdline "console=hvc0 reboot=t"
+```
+
+Useful direct flags:
+
+- `-mem` MiB (default `1024`)
+- `-cpu` vCPUs (default `1`)
+- `-kernel` kernel path/URL
+- `-initrd` initrd path/URL
+- `-cmdline` guest kernel cmdline
+- `-firmware` firmware image path/URL (experimental firmware boot)
+- `-iso` ISO path/URL (attached as read-only block)
+- `-block` repeatable block device spec (supports `:ro`)
+- `-tap` TAP interface name
+
+## Daemon Mode
+
+Start daemon and control socket:
+
+```sh
+./kube-vm -server -socket /tmp/kube-vm.sock
+```
+
+Control socket default is `/tmp/kube-vm.sock`.
+
+## kube-vmctl
+
+`kube-vmctl` controls the daemon over the Unix socket.
+
+General:
+
+```sh
+./kube-vmctl -socket /tmp/kube-vm.sock <command> [flags]
+```
+
+Commands:
+
+- `status` / `info`
+- `list`
+- `start` / `run`
+- `connect` / `attach`
+- `shutdown` / `stop` / `quit`
+
+Examples:
+
+```sh
+# Start and attach console immediately
+./kube-vmctl start -kernel ./bzImage -initrd ./initrd.cpio.gz
+
+# Start detached
+./kube-vmctl start -detach -kernel ./bzImage -initrd ./initrd.cpio.gz
+
+# List running VMs
+./kube-vmctl list
+
+# Attach later
+./kube-vmctl connect -uid abc123
+
+# Stop VM
+./kube-vmctl shutdown -uid abc123
+```
+
+Start-time flags accepted by `kube-vmctl`:
+
+- `-uid` fixed VM UID (optional)
+- `-firmware`
+- `-kernel`
+- `-initrd`
+- `-iso`
+- `-cmdline`
+- `-mem`
+- `-cpu`
+- `-tap`
+- `-block` (repeatable, supports `:ro`)
+- `-detach`
+
+Environment:
+
+- `KUBEVM_SOCKET`: default socket path for `kube-vmctl`
+
+## VM IDs and Console Sockets
+
+- VM UIDs are 6 characters if auto-generated.
+- Per-VM console socket path is:
+
+```text
+<socket>.<uid>.console
+```
+
+Example with default socket:
+
+```text
+/tmp/kube-vm.sock.abc123.console
+```
+
+## Storage and Boot Options
+
+### Block device specs
+
+Block specs currently support:
+
+- local file path or `file://...`
+- `http://...` / `https://...` (read-only)
+- `mem:<bytes>`
+
+Append `:ro` to force read-only for file/mem specs.
+
+Examples:
+
+```sh
+-block ./disk.raw
+-block ./cloudinit.iso:ro
+-block https://example.com/rootfs.img
+-block mem:1048576
+```
+
+### ISO
+
+Attach ISO as read-only block:
+
+```sh
+./kube-vmctl start -kernel ./bzImage -initrd ./initrd.cpio.gz -iso ./guest.iso
+```
+
+### Firmware (Experimental)
+
+Firmware mode boots from `-firmware` and ignores `-kernel` / `-initrd`.
+
+```sh
+./kube-vmctl start -firmware ./bios.bin -iso ./guest.iso
+```
+
+## Networking (TAP)
+
+Attach virtio-net backed by TAP:
+
+```sh
+./kube-vmctl start -kernel ./bzImage -initrd ./initrd.cpio.gz -tap tap0
+```
+
+If TAP does not exist, kube-vm attempts to create it via `/dev/net/tun`.
+
+## Web Frontend and API
+
+Enable web UI/API:
+
+```sh
+./kube-vm -server -web-host 127.0.0.1 -web-port 9090
+```
+
+Expose externally:
+
+```sh
+./kube-vm -server -web-host 0.0.0.0 -web-port 9090
+```
+
+Enable token auth (recommended when not localhost-only):
+
+```sh
+./kube-vm -server -web-host 0.0.0.0 -web-port 9090 -web-token "change-me"
+```
+
+Open:
+
+```text
+http://<host>:<port>
+```
+
+Web features:
+
+- start/stop VM
+- list VM state
+- daemon stats
+- per-VM host metrics (`host_cpu_pct`, `host_cpu_sec`, `host_mem_bytes`)
+- web console attach/input/close
+
+Auth accepted by API when `-web-token` is set:
+
+- `Authorization: Bearer <token>`
+- `X-Auth-Token: <token>`
+- query parameter `?token=<token>`
+
+## Web API (Current)
+
+- `GET /api/v1/vms`
+- `POST /api/v1/vms/start`
+- `POST /api/v1/vms/stop?uid=<uid>`
+- `GET /api/v1/stats`
+- `POST /api/v1/console/open?uid=<uid>`
+- `GET /api/v1/console/poll?id=<session_id>`
+- `POST /api/v1/console/input?id=<session_id>`
+- `POST /api/v1/console/close?id=<session_id>`
+
+## Notes
+
+- shutdown paths are defensive and include panic recovery in API and VM close wrappers to avoid daemon crashes from stop requests.
+- the firmware path is experimental and not a full PC BIOS/UEFI platform emulation.
+- this project currently focuses on Linux amd64 hosts.
+
+## Troubleshooting
+
+- `kube-vmctl: vm: instance is not running`: check `kube-vmctl list` for valid UID.
+- web API `unauthorized`: provide token matching `-web-token`.
+- KVM open/compat errors: verify host virtualization support and `/dev/kvm` access.
+- TAP failures: verify privileges and host network policy.

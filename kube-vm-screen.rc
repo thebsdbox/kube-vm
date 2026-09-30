@@ -1,6 +1,10 @@
-sessionname kube-vm-test
+defmousetrack on
 mousetrack on
-screen 0 ./kube-vm
+bindkey "^[[5~" eval "copy" "stuff ^b"
+bindkey "^[[6~" eval "copy" "stuff ^f"
+sessionname kube-vm-test
+screen 0 ./kube-vm -server -web-port 9090 -web-token "password" -web-host "0.0.0.0"
 split
 focus down
+resize 75%
 screen 1 bash

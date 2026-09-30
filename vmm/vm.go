@@ -698,6 +698,26 @@ func (m *VM) requestExitLocked() {
 	}
 }
 
+// ThreadIDs returns current host thread IDs used by the VM's VCPU workers.
+func (m *VM) ThreadIDs() []int {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]int, 0, len(m.cpu))
+	for _, c := range m.cpu {
+		if c == nil {
+			continue
+		}
+		tid := int(atomic.LoadInt32(&c.tid))
+		if tid > 0 {
+			ids = append(ids, tid)
+		}
+	}
+	return ids
+}
+
 func (c *vcpu) State() *kvm.VCPUState {
 	if c == nil || c.mm == nil {
 		return nil

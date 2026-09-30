@@ -17,9 +17,16 @@ import (
 // Handler exposes the operations that a VM server must implement.
 type Handler interface {
 	Status(uid string) string
+	List() []VMSummary
 	Start(uid string, payload map[string]any) (string, error)
 	Connect(uid string) error
 	Shutdown(uid string) error
+}
+
+// VMSummary describes a running VM instance.
+type VMSummary struct {
+	UID   string `json:"uid"`
+	State string `json:"state"`
 }
 
 // Request is a JSON request sent over the control socket.
@@ -30,11 +37,12 @@ type Request struct {
 
 // Response is sent back over the control socket.
 type Response struct {
-	OK      bool   `json:"ok"`
-	UID     string `json:"uid,omitempty"`
-	State   string `json:"state,omitempty"`
-	Message string `json:"message,omitempty"`
-	Error   string `json:"error,omitempty"`
+	OK      bool        `json:"ok"`
+	UID     string      `json:"uid,omitempty"`
+	State   string      `json:"state,omitempty"`
+	VMs     []VMSummary `json:"vms,omitempty"`
+	Message string      `json:"message,omitempty"`
+	Error   string      `json:"error,omitempty"`
 }
 
 // Dial sends a request to the server at socketPath and decodes the response.
@@ -119,6 +127,10 @@ func handleRequest(req Request, handler Handler) Response {
 	case "", "status":
 		return Response{OK: true, UID: uid, State: handler.Status(uid), Message: "vm instance is available"}
 
+	case "list":
+		vms := handler.List()
+		return Response{OK: true, VMs: vms, State: handler.Status(""), Message: "vm instances listed"}
+
 	case "start":
 		startUID, err := handler.Start(uid, req.Payload)
 		if err != nil {
@@ -166,6 +178,7 @@ type ConsoleSession struct {
 	cond    *sync.Cond
 	conn    net.Conn
 	closed  bool
+	dropped bool
 	onClose func()
 }
 
@@ -182,7 +195,14 @@ func (s *ConsoleSession) SetConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	if s.conn != nil {
+		fmt.Fprintf(os.Stderr, "kube-vm: console session: replacing existing client %s with %s\n", s.conn.RemoteAddr(), conn.RemoteAddr())
+		_ = s.conn.Close()
+	} else {
+		fmt.Fprintf(os.Stderr, "kube-vm: console session: client attached %s\n", conn.RemoteAddr())
+	}
 	s.conn = conn
+	s.dropped = false
 	s.cond.Broadcast()
 }
 
@@ -199,6 +219,7 @@ func (s *ConsoleSession) Close() error {
 		return nil
 	}
 	s.closed = true
+	fmt.Fprintln(os.Stderr, "kube-vm: console session: closing")
 	if s.conn != nil {
 		c := s.conn
 		s.conn = nil
@@ -226,8 +247,14 @@ func (s *ConsoleSession) Read(p []byte) (int, error) {
 		if conn != nil {
 			n, err := conn.Read(p)
 			if err != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
-				_ = s.Close()
-				return 0, io.EOF
+				s.mu.Lock()
+				if s.conn == conn {
+					s.conn = nil
+					s.dropped = false
+				}
+				s.mu.Unlock()
+				fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while reading (%v); waiting for reattach\n", err)
+				continue
 			}
 			return n, err
 		}
@@ -239,17 +266,39 @@ func (s *ConsoleSession) Read(p []byte) (int, error) {
 
 func (s *ConsoleSession) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	if s.closed || s.conn == nil {
+	if s.closed {
 		s.mu.Unlock()
 		return 0, io.EOF
 	}
-	n, err := s.conn.Write(p)
-	if err != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
-		s.mu.Unlock()
-		_ = s.Close()
-		return 0, io.EOF
-	}
+	conn := s.conn
+	dropped := s.dropped
 	s.mu.Unlock()
+
+	if conn == nil {
+		if !dropped {
+			s.mu.Lock()
+			if !s.closed && s.conn == nil && !s.dropped {
+				s.dropped = true
+				fmt.Fprintln(os.Stderr, "kube-vm: console session: no client attached; dropping console output until a client connects")
+			}
+			s.mu.Unlock()
+		}
+		return len(p), nil
+	}
+
+	n, err := conn.Write(p)
+	if err != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
+		s.mu.Lock()
+		if s.conn == conn {
+			s.conn = nil
+			s.dropped = false
+		}
+		s.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while writing (%v); waiting for reattach\n", err)
+		// Treat disconnect as non-fatal; allow future reattach.
+		return len(p), nil
+	}
+
 	return n, err
 }
 
@@ -273,6 +322,8 @@ func ServeConsole(ctx context.Context, socketPath string, session *ConsoleSessio
 		return fmt.Errorf("control: chmod console socket %q: %w", socketPath, err)
 	}
 
+	fmt.Fprintf(os.Stderr, "kube-vm: console server: listening on %s\n", socketPath)
+
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -290,6 +341,7 @@ func ServeConsole(ctx context.Context, socketPath string, session *ConsoleSessio
 			}
 		}
 
+		fmt.Fprintf(os.Stderr, "kube-vm: console server: accepted client %s\n", conn.RemoteAddr())
 		session.SetConn(conn)
 		go func(c net.Conn) {
 			<-ctx.Done()
