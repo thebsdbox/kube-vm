@@ -238,6 +238,9 @@ func (s *ConsoleSession) Close() error {
 func (s *ConsoleSession) Read(p []byte) (int, error) {
 	for {
 		s.mu.Lock()
+		for !s.closed && s.conn == nil {
+			s.cond.Wait()
+		}
 		if s.closed && s.conn == nil {
 			s.mu.Unlock()
 			return 0, io.EOF
@@ -246,7 +249,7 @@ func (s *ConsoleSession) Read(p []byte) (int, error) {
 		s.mu.Unlock()
 		if conn != nil {
 			n, err := conn.Read(p)
-			if err != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
+			if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
 				s.mu.Lock()
 				if s.conn == conn {
 					s.conn = nil
@@ -258,9 +261,6 @@ func (s *ConsoleSession) Read(p []byte) (int, error) {
 			}
 			return n, err
 		}
-		s.mu.Lock()
-		s.cond.Wait()
-		s.mu.Unlock()
 	}
 }
 
@@ -287,7 +287,7 @@ func (s *ConsoleSession) Write(p []byte) (int, error) {
 	}
 
 	n, err := conn.Write(p)
-	if err != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
+	if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
 		s.mu.Lock()
 		if s.conn == conn {
 			s.conn = nil

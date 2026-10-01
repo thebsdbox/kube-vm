@@ -15,6 +15,7 @@ kube-vm is a Linux KVM-based VM runner written in Go. It supports:
 - `/dev/kvm` available
 - Go 1.24+
 - for TAP networking: permissions to create/use TAP interfaces
+- for NAT networking: `ip` and `iptables` available on host
 - for `build-disk`: Docker + loop mount permissions (`sudo`)
 
 ## Build
@@ -73,6 +74,7 @@ Useful direct flags:
 - `-iso` ISO path/URL (attached as read-only block)
 - `-block` repeatable block device spec (supports `:ro`)
 - `-tap` TAP interface name
+- `-nat` auto-create TAP with host NAT (Linux only, mutually exclusive with `-tap`)
 
 ## Daemon Mode
 
@@ -132,6 +134,7 @@ Start-time flags accepted by `kube-vmctl`:
 - `-mem`
 - `-cpu`
 - `-tap`
+- `-nat` (Linux only, mutually exclusive with `-tap`)
 - `-block` (repeatable, supports `:ro`)
 - `-detach`
 
@@ -200,6 +203,26 @@ Attach virtio-net backed by TAP:
 ```
 
 If TAP does not exist, kube-vm attempts to create it via `/dev/net/tun`.
+
+## Networking (NAT)
+
+Enable Linux host-side NAT with automatic TAP creation:
+
+```sh
+./kube-vmctl start -kernel ./bzImage -initrd ./initrd.cpio.gz -nat
+```
+
+NAT mode configures:
+
+- per-VM TAP interface
+- host IPv4 forwarding
+- `iptables` forwarding and masquerade rules
+
+Notes:
+
+- `-nat` and `-tap` are mutually exclusive.
+- NAT mode runs a per-VM DHCP service and hands out one lease (`nat_guest_ip`).
+- Guest IP hint and gateway are exposed in VM stats (`nat_guest_ip`, `nat_gateway`, `nat_subnet`).
 
 ## Web Frontend and API
 

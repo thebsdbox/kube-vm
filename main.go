@@ -6,12 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -20,10 +16,10 @@ import (
 	"time"
 
 	"kube-vm/control"
-	osfirmware "kube-vm/os/firmware"
-	"kube-vm/os/linux"
-	"kube-vm/virtio"
+	"kube-vm/hoststats"
+	"kube-vm/vmconfig"
 	"kube-vm/vmm"
+	"kube-vm/vmnet"
 	"kube-vm/webui"
 
 	"golang.org/x/sys/unix"
@@ -41,6 +37,7 @@ func main() {
 		isoPath      = flag.String("iso", "", "attach ISO image from file or URL as read-only block device")
 		cmdline      = flag.String("cmdline", "console=hvc0 reboot=t", "set the kernel command line")
 		tapName      = flag.String("tap", "", "attach a virtio-net device backed by TAP (optional name)")
+		natMode      = flag.Bool("nat", false, "attach a virtio-net device with host NAT (Linux only)")
 		socketPath   = flag.String("socket", "/tmp/kube-vm.sock", "path to the kube-vm control socket")
 		webHost      = flag.String("web-host", "127.0.0.1", "host to bind the web frontend")
 		webPort      = flag.Int("web-port", 0, "enable web frontend on this port (0 disables)")
@@ -51,75 +48,38 @@ func main() {
 
 	flag.Var(&blkdev, "block", "add a block device (multiple OK)")
 	flag.Parse()
+	if *natMode && *tapName != "" {
+		fmt.Fprintln(os.Stderr, "kube-vm: -nat and -tap are mutually exclusive")
+		os.Exit(2)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), unix.SIGINT, unix.SIGTERM)
 	defer stop()
 
 	if !*serverMode {
-		var loader vmm.Loader
-		if *firmwarePath != "" {
-			fw, err := readURL(*firmwarePath)
-			if err != nil {
-				panic(err)
-			}
-			loader = &osfirmware.Loader{Firmware: fw}
-		} else {
-			bzImage, err := readURL(*kernelPath)
-			if err != nil {
-				panic(err)
-			}
-
-			ll := &linux.Loader{
-				Kernel:  bzImage,
-				Cmdline: *cmdline,
-			}
-
-			if *initrdPath != "" {
-				initrd, err := readURL(*initrdPath)
-				if err != nil {
-					panic(err)
-				}
-
-				ll.Initrd = initrd
-			}
-
-			loader = ll
+		cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
+			UID:          "local",
+			FirmwarePath: *firmwarePath,
+			KernelPath:   *kernelPath,
+			InitrdPath:   *initrdPath,
+			BlockSpecs:   []string(blkdev),
+			ISOPath:      *isoPath,
+			Cmdline:      *cmdline,
+			MemMiB:       *memSize,
+			NumCPU:       *numCPU,
+			TapName:      *tapName,
+			NATMode:      *natMode,
+			ConsoleIn:    os.Stdin,
+			ConsoleOut:   os.Stdout,
+		})
+		if err != nil {
+			panic(err)
 		}
-
-		cfg := vmm.Config{
-			MemSize: *memSize << 20,
-			NumCPU:  *numCPU,
-			Loader:  loader,
+		if netCfg.NAT {
+			fmt.Fprintf(os.Stderr, "kube-vm: NAT enabled on %s (guest route via %s, guest IP hint %s)\n", netCfg.TapName, netCfg.NATGateway, netCfg.NATGuestIP)
+		} else if netCfg.TapName != "" {
+			fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s\n", netCfg.TapName)
 		}
-
-		for _, s := range blkdev {
-			s, ro := strings.CutSuffix(s, ":ro")
-			bd, err := blockDeviceFromSpec(s, ro)
-			if err != nil {
-				panic(err)
-			}
-			cfg.Devices = append(cfg.Devices, bd)
-		}
-
-		if *isoPath != "" {
-			isoDev, err := blockDeviceFromSpec(*isoPath, true)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintf(os.Stderr, "kube-vm: using ISO image %s\n", *isoPath)
-			cfg.Devices = append(cfg.Devices, isoDev)
-		}
-
-		if *tapName != "" {
-			tap, name, err := virtio.OpenTAP(*tapName)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s\n", name)
-			cfg.Devices = append(cfg.Devices, &virtio.NetDevice{Backend: tap})
-		}
-
-		cfg.Devices = append(cfg.Devices, &virtio.ConsoleDevice{In: os.Stdin, Out: os.Stdout})
 
 		m, err := vmm.New(cfg)
 		if err != nil {
@@ -165,6 +125,7 @@ func main() {
 			"iso":      *isoPath,
 			"cmdline":  *cmdline,
 			"tap":      *tapName,
+			"nat":      *natMode,
 		}
 		if len(blkdev) > 0 {
 			blocks := make([]string, len(blkdev))
@@ -248,6 +209,9 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	if uid == "" {
 		uid = generateUID()
 	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
 
 	s.mu.Lock()
 	if _, ok := s.vms[uid]; ok {
@@ -275,6 +239,7 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		iso:            asString(payload, "iso", ""),
 		cmdline:        asString(payload, "cmdline", "console=hvc0 reboot=t"),
 		tap:            asString(payload, "tap", ""),
+		nat:            asBool(payload, "nat", false),
 		block:          asStringSlice(payload, "block"),
 	}
 	consoleSession.SetOnClose(func() {
@@ -283,11 +248,38 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 			fmt.Fprintf(os.Stderr, "kube-vm: shutdown vm %s on console close: %v\n", uid, err)
 		}
 	})
+	payload["uid"] = uid
 	logVM(uid, "start", "building VM configuration")
-	cfg, err := buildVMConfig(payload, consoleSession)
+	cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
+		UID:          uid,
+		FirmwarePath: asString(payload, "firmware", ""),
+		KernelPath:   asString(payload, "kernel", "bzImage"),
+		InitrdPath:   asString(payload, "initrd", ""),
+		BlockSpecs:   asStringSlice(payload, "block"),
+		ISOPath:      asString(payload, "iso", ""),
+		Cmdline:      asString(payload, "cmdline", "console=hvc0 reboot=t"),
+		MemMiB:       asInt(payload, "mem", 1024),
+		NumCPU:       asInt(payload, "cpu", 1),
+		TapName:      asString(payload, "tap", ""),
+		NATMode:      asBool(payload, "nat", false),
+		ConsoleIn:    consoleSession,
+		ConsoleOut:   consoleSession,
+	})
 	if err != nil {
 		logVM(uid, "start", "config build failed: %v", err)
 		return "", err
+	}
+	if netCfg.TapName != "" {
+		vmc.tap = netCfg.TapName
+	}
+	if netCfg.NAT {
+		vmc.nat = true
+		vmc.natSubnet = netCfg.NATSubnet
+		vmc.natGateway = netCfg.NATGateway
+		vmc.natGuestIP = netCfg.NATGuestIP
+	}
+	if len(netCfg.NICs) > 0 {
+		vmc.nics = append(vmc.nics[:0], netCfg.NICs...)
 	}
 
 	logVM(uid, "start", "creating VMM instance")
@@ -414,6 +406,11 @@ type vmController struct {
 	iso            string
 	cmdline        string
 	tap            string
+	nat            bool
+	natSubnet      string
+	natGateway     string
+	natGuestIP     string
+	nics           []vmnet.NICStatsSource
 	block          []string
 	lastError      string
 	hostCPUSec     float64
@@ -426,23 +423,37 @@ type vmController struct {
 }
 
 type vmStats struct {
-	UID          string   `json:"uid"`
-	State        string   `json:"state"`
-	StartedAt    string   `json:"started_at,omitempty"`
-	UptimeSec    int64    `json:"uptime_sec,omitempty"`
-	MemMiB       int      `json:"mem_mib,omitempty"`
-	NumCPU       int      `json:"num_cpu,omitempty"`
-	Firmware     string   `json:"firmware,omitempty"`
-	Kernel       string   `json:"kernel,omitempty"`
-	Initrd       string   `json:"initrd,omitempty"`
-	ISO          string   `json:"iso,omitempty"`
-	Cmdline      string   `json:"cmdline,omitempty"`
-	Tap          string   `json:"tap,omitempty"`
-	Block        []string `json:"block,omitempty"`
-	HostMemBytes uint64   `json:"host_mem_bytes,omitempty"`
-	HostCPUSec   float64  `json:"host_cpu_sec,omitempty"`
-	HostCPUPct   float64  `json:"host_cpu_pct,omitempty"`
-	LastError    string   `json:"last_error,omitempty"`
+	UID          string     `json:"uid"`
+	State        string     `json:"state"`
+	StartedAt    string     `json:"started_at,omitempty"`
+	UptimeSec    int64      `json:"uptime_sec,omitempty"`
+	MemMiB       int        `json:"mem_mib,omitempty"`
+	NumCPU       int        `json:"num_cpu,omitempty"`
+	Firmware     string     `json:"firmware,omitempty"`
+	Kernel       string     `json:"kernel,omitempty"`
+	Initrd       string     `json:"initrd,omitempty"`
+	ISO          string     `json:"iso,omitempty"`
+	Cmdline      string     `json:"cmdline,omitempty"`
+	Tap          string     `json:"tap,omitempty"`
+	NAT          bool       `json:"nat,omitempty"`
+	NATSubnet    string     `json:"nat_subnet,omitempty"`
+	NATGateway   string     `json:"nat_gateway,omitempty"`
+	NATGuestIP   string     `json:"nat_guest_ip,omitempty"`
+	NICs         []nicStats `json:"nics,omitempty"`
+	Block        []string   `json:"block,omitempty"`
+	HostMemBytes uint64     `json:"host_mem_bytes,omitempty"`
+	HostCPUSec   float64    `json:"host_cpu_sec,omitempty"`
+	HostCPUPct   float64    `json:"host_cpu_pct,omitempty"`
+	LastError    string     `json:"last_error,omitempty"`
+}
+
+type nicStats struct {
+	Name      string `json:"name"`
+	Mode      string `json:"mode"`
+	RXPackets uint64 `json:"rx_packets"`
+	RXBytes   uint64 `json:"rx_bytes"`
+	TXPackets uint64 `json:"tx_packets"`
+	TXBytes   uint64 `json:"tx_bytes"`
 }
 
 type daemonStats struct {
@@ -547,6 +558,10 @@ func (c *vmController) snapshot(now time.Time) vmStats {
 		ISO:          c.iso,
 		Cmdline:      c.cmdline,
 		Tap:          c.tap,
+		NAT:          c.nat,
+		NATSubnet:    c.natSubnet,
+		NATGateway:   c.natGateway,
+		NATGuestIP:   c.natGuestIP,
 		HostMemBytes: uint64(c.memMiB) << 20,
 		HostCPUSec:   c.hostCPUSec,
 		HostCPUPct:   c.hostCPUPercent,
@@ -554,6 +569,23 @@ func (c *vmController) snapshot(now time.Time) vmStats {
 	}
 	if len(c.block) > 0 {
 		out.Block = append([]string(nil), c.block...)
+	}
+	if len(c.nics) > 0 {
+		out.NICs = make([]nicStats, 0, len(c.nics))
+		for _, nic := range c.nics {
+			if nic == nil {
+				continue
+			}
+			snap := nic.Snapshot()
+			out.NICs = append(out.NICs, nicStats{
+				Name:      snap.Name,
+				Mode:      snap.Mode,
+				RXPackets: snap.RXPackets,
+				RXBytes:   snap.RXBytes,
+				TXPackets: snap.TXPackets,
+				TXBytes:   snap.TXBytes,
+			})
+		}
 	}
 	if c.vm != nil {
 		out.State = "running"
@@ -573,7 +605,7 @@ func (c *vmController) updateHostCPULocked(now time.Time) {
 
 	total := 0.0
 	for _, tid := range c.vm.ThreadIDs() {
-		sec, err := readTaskCPUSec(tid)
+		sec, err := hoststats.ReadTaskCPUSec(tid)
 		if err != nil {
 			continue
 		}
@@ -622,16 +654,15 @@ func (s *vmServer) daemonStats() daemonStats {
 	startedAt := s.startedAt
 	s.mu.Unlock()
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	snap := hoststats.CaptureDaemonSnapshot(s.Status(""), startedAt, count)
 	return daemonStats{
-		State:          s.Status(""),
-		StartedAt:      startedAt.Format(time.RFC3339),
-		UptimeSec:      int64(time.Since(startedAt).Seconds()),
-		VMTotal:        count,
-		GoRoutines:     runtime.NumGoroutine(),
-		HeapAllocBytes: ms.HeapAlloc,
-		HeapObjects:    ms.HeapObjects,
+		State:          snap.State,
+		StartedAt:      snap.StartedAt,
+		UptimeSec:      snap.UptimeSec,
+		VMTotal:        snap.VMTotal,
+		GoRoutines:     snap.GoRoutines,
+		HeapAllocBytes: snap.HeapAllocBytes,
+		HeapObjects:    snap.HeapObjects,
 	}
 }
 
@@ -661,22 +692,6 @@ func (s *vmServer) consoleSocket(uid string) (string, error) {
 	return s.socketPath + "." + uid + ".console", nil
 }
 
-func readTaskCPUSec(tid int) (float64, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/self/task/%d/schedstat", tid))
-	if err != nil {
-		return 0, err
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) < 1 {
-		return 0, fmt.Errorf("schedstat parse failed for tid %d", tid)
-	}
-	ns, err := strconv.ParseUint(fields[0], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return float64(ns) / float64(time.Second), nil
-}
-
 func safeCloseVM(vm *vmm.VM) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -685,78 +700,6 @@ func safeCloseVM(vm *vmm.VM) (err error) {
 		}
 	}()
 	return vm.Close()
-}
-
-func buildVMConfig(payload map[string]any, consoleSession *control.ConsoleSession) (vmm.Config, error) {
-	firmwarePath := asString(payload, "firmware", "")
-	kernel := asString(payload, "kernel", "bzImage")
-	initrd := asString(payload, "initrd", "")
-	blocks := asStringSlice(payload, "block")
-	iso := asString(payload, "iso", "")
-	cmdline := asString(payload, "cmdline", "console=hvc0 reboot=t")
-	memSize := asInt(payload, "mem", 1024)
-	numCPU := asInt(payload, "cpu", 1)
-	tapName := asString(payload, "tap", "")
-
-	var loader vmm.Loader
-	if firmwarePath != "" {
-		fw, err := readURL(firmwarePath)
-		if err != nil {
-			return vmm.Config{}, err
-		}
-		loader = &osfirmware.Loader{Firmware: fw}
-	} else {
-		bzImage, err := readURL(kernel)
-		if err != nil {
-			return vmm.Config{}, err
-		}
-
-		ll := &linux.Loader{Kernel: bzImage, Cmdline: cmdline}
-		if initrd != "" {
-			initrdBytes, err := readURL(initrd)
-			if err != nil {
-				return vmm.Config{}, err
-			}
-			ll.Initrd = initrdBytes
-		}
-		loader = ll
-	}
-
-	cfg := vmm.Config{
-		MemSize: memSize << 20,
-		NumCPU:  numCPU,
-		Loader:  loader,
-	}
-
-	for _, s := range blocks {
-		spec, ro := strings.CutSuffix(s, ":ro")
-		bd, err := blockDeviceFromSpec(spec, ro)
-		if err != nil {
-			return vmm.Config{}, err
-		}
-		cfg.Devices = append(cfg.Devices, bd)
-	}
-
-	if iso != "" {
-		isoDev, err := blockDeviceFromSpec(iso, true)
-		if err != nil {
-			return vmm.Config{}, err
-		}
-		fmt.Fprintf(os.Stderr, "kube-vm: using ISO image %s\n", iso)
-		cfg.Devices = append(cfg.Devices, isoDev)
-	}
-
-	if tapName != "" {
-		tap, name, err := virtio.OpenTAP(tapName)
-		if err != nil {
-			return vmm.Config{}, err
-		}
-		fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s\n", name)
-		cfg.Devices = append(cfg.Devices, &virtio.NetDevice{Backend: tap})
-	}
-
-	cfg.Devices = append(cfg.Devices, &virtio.ConsoleDevice{In: consoleSession, Out: consoleSession})
-	return cfg, nil
 }
 
 func asString(payload map[string]any, key, def string) string {
@@ -801,6 +744,40 @@ func asInt(payload map[string]any, key string, def int) int {
 	return def
 }
 
+func asBool(payload map[string]any, key string, def bool) bool {
+	if payload == nil {
+		return def
+	}
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return def
+	}
+	switch val := v.(type) {
+	case bool:
+		return val
+	case string:
+		norm := strings.ToLower(strings.TrimSpace(val))
+		switch norm {
+		case "1", "true", "t", "yes", "y", "on":
+			return true
+		case "0", "false", "f", "no", "n", "off", "":
+			return false
+		default:
+			return def
+		}
+	case int:
+		return val != 0
+	case int32:
+		return val != 0
+	case int64:
+		return val != 0
+	case float64:
+		return val != 0
+	default:
+		return def
+	}
+}
+
 func asStringSlice(payload map[string]any, key string) []string {
 	if payload == nil {
 		return nil
@@ -837,79 +814,6 @@ func asStringSlice(payload map[string]any, key string) []string {
 	}
 
 	return nil
-}
-
-func readURL(s string) (body []byte, err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("kube-vm: read URL %s: %w", s, err)
-		}
-	}()
-
-	u, err := url.Parse(s)
-	if err != nil {
-		return nil, err
-	}
-
-	switch u.Scheme {
-	case "", "file":
-		return os.ReadFile(u.Path)
-
-	case "http", "https":
-		res, err := http.Get(u.String())
-		if err != nil {
-			panic(err)
-		}
-
-		if res.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("response status %d != %d", res.StatusCode, 200)
-		}
-
-		defer res.Body.Close()
-		return io.ReadAll(res.Body)
-
-	default:
-		panic(u.Scheme)
-	}
-}
-
-func blockDeviceFromSpec(spec string, readOnly bool) (*virtio.BlockDevice, error) {
-	u, err := url.Parse(spec)
-	if err != nil {
-		return nil, fmt.Errorf("kube-vm: parse block device %q: %w", spec, err)
-	}
-
-	var stg virtio.BlockStorage
-	ro := readOnly
-
-	switch u.Scheme {
-	case "file", "":
-		flags := os.O_RDWR
-		if ro {
-			flags = os.O_RDONLY
-		}
-		f, err := os.OpenFile(u.Path, flags, 0)
-		if err != nil {
-			return nil, fmt.Errorf("kube-vm: open block file %q: %w", u.Path, err)
-		}
-		stg = &virtio.FileStorage{File: f}
-
-	case "http", "https":
-		ro = true
-		stg = &virtio.HTTPStorage{URL: u.String()}
-
-	case "mem":
-		sz, err := strconv.ParseInt(u.Opaque, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("kube-vm: parse mem block size %q: %w", u.Opaque, err)
-		}
-		stg = &virtio.MemStorage{Bytes: make([]byte, sz)}
-
-	default:
-		return nil, fmt.Errorf("kube-vm: unsupported block storage scheme %q", u.Scheme)
-	}
-
-	return &virtio.BlockDevice{ReadOnly: ro, Storage: stg}, nil
 }
 
 // flagStrings is a flag.Value that collects strings.
