@@ -10,9 +10,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TapDevice is a TAP-backed network file descriptor with explicit teardown semantics.
+type TapDevice struct {
+	*os.File
+	name string
+}
+
 // OpenTAP creates or opens a TAP device and returns it with its final name.
 // If name is empty, the kernel assigns a name (for example, tap0).
-func OpenTAP(name string) (*os.File, string, error) {
+func OpenTAP(name string) (*TapDevice, string, error) {
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, "", fmt.Errorf("open /dev/net/tun: %w", err)
@@ -32,7 +38,24 @@ func OpenTAP(name string) (*os.File, string, error) {
 	}
 
 	finalName := cstring(ifreq.Name[:])
-	return os.NewFile(uintptr(fd), finalName), finalName, nil
+	return &TapDevice{File: os.NewFile(uintptr(fd), finalName), name: finalName}, finalName, nil
+}
+
+func (t *TapDevice) Close() error {
+	if t == nil || t.File == nil {
+		return nil
+	}
+
+	if t.name != "" {
+		if err := unix.IoctlSetPointerInt(int(t.File.Fd()), unix.TUNSETPERSIST, 0); err != nil {
+			if err != unix.ENOTTY && err != unix.ENODEV && err != unix.EINVAL {
+				_ = t.File.Close()
+				return err
+			}
+		}
+	}
+
+	return t.File.Close()
 }
 
 type ifreqFlags struct {

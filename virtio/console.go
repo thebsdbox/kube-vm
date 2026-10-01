@@ -49,7 +49,10 @@ func (h *consoleHandler) QueueReady(num int, q *virtq.Queue, notify <-chan struc
 				defer h.wg.Done()
 				for range notify {
 					if err := h.handleRx(q); err != nil {
-						slog.Error("console rx: %v", err)
+						if err == io.EOF {
+							return
+						}
+						slog.Error("console rx", "err", err)
 					}
 				}
 			}()
@@ -62,7 +65,10 @@ func (h *consoleHandler) QueueReady(num int, q *virtq.Queue, notify <-chan struc
 				defer h.wg.Done()
 				for range notify {
 					if err := h.handleTx(q); err != nil {
-						slog.Error("console tx: %v", err)
+						if err == io.EOF {
+							return
+						}
+						slog.Error("console tx", "err", err)
 					}
 				}
 			}()
