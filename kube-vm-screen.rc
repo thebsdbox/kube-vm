@@ -3,7 +3,7 @@ mousetrack on
 bindkey "^[[5~" eval "copy" "stuff ^b"
 bindkey "^[[6~" eval "copy" "stuff ^f"
 sessionname kube-vm-test
-screen 0 sudo ./kube-vm -server -web-port 9090 -web-token "password" -web-host "0.0.0.0"
+screen 0 sudo ./kube-vm -server -web-port 9090 -web-token "password" -web-host "0.0.0.0" > /tmp/kube-vm.logs
 split
 focus down
 resize 75%

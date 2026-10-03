@@ -38,6 +38,9 @@ func main() {
 		cmdline      = flag.String("cmdline", "console=hvc0 reboot=t", "set the kernel command line")
 		tapName      = flag.String("tap", "", "attach a virtio-net device backed by TAP (optional name)")
 		natMode      = flag.Bool("nat", false, "attach a virtio-net device with host NAT (Linux only)")
+		vhostNet     = flag.Bool("vhost-net", false, "enable vhost-net acceleration for TAP networking (Linux only, requires -tap)")
+		vsockCID     = flag.Uint64("vsock-cid", 0, "attach a virtio-vsock device with guest CID (0 disables, 1/2 reserved)")
+		vsockPort    = flag.Uint("vsock", 0, "attach a virtio-vsock device backed by a host AF_VSOCK listener on port (0 disables)")
 		socketPath   = flag.String("socket", "/tmp/kube-vm.sock", "path to the kube-vm control socket")
 		webHost      = flag.String("web-host", "127.0.0.1", "host to bind the web frontend")
 		webPort      = flag.Int("web-port", 0, "enable web frontend on this port (0 disables)")
@@ -50,6 +53,14 @@ func main() {
 	flag.Parse()
 	if *natMode && *tapName != "" {
 		fmt.Fprintln(os.Stderr, "kube-vm: -nat and -tap are mutually exclusive")
+		os.Exit(2)
+	}
+	if *vhostNet && *tapName == "" {
+		fmt.Fprintln(os.Stderr, "kube-vm: -vhost-net requires -tap")
+		os.Exit(2)
+	}
+	if *vhostNet && *natMode {
+		fmt.Fprintln(os.Stderr, "kube-vm: -vhost-net cannot be used with -nat")
 		os.Exit(2)
 	}
 
@@ -69,6 +80,9 @@ func main() {
 			NumCPU:       *numCPU,
 			TapName:      *tapName,
 			NATMode:      *natMode,
+			VhostNet:     *vhostNet,
+			VSOCKCID:     *vsockCID,
+			VSOCKPort:    uint32(*vsockPort),
 			ConsoleIn:    os.Stdin,
 			ConsoleOut:   os.Stdout,
 		})
@@ -78,7 +92,11 @@ func main() {
 		if netCfg.NAT {
 			fmt.Fprintf(os.Stderr, "kube-vm: NAT enabled on %s (guest route via %s, guest IP hint %s)\n", netCfg.TapName, netCfg.NATGateway, netCfg.NATGuestIP)
 		} else if netCfg.TapName != "" {
-			fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s\n", netCfg.TapName)
+			if netCfg.VhostNet {
+				fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s with vhost-net\n", netCfg.TapName)
+			} else {
+				fmt.Fprintf(os.Stderr, "kube-vm: using tap backend %s\n", netCfg.TapName)
+			}
 		}
 
 		m, err := vmm.New(cfg)
@@ -117,15 +135,18 @@ func main() {
 
 	if *webPort > 0 {
 		server.defaultStart = map[string]any{
-			"mem":      *memSize,
-			"cpu":      *numCPU,
-			"firmware": *firmwarePath,
-			"kernel":   *kernelPath,
-			"initrd":   *initrdPath,
-			"iso":      *isoPath,
-			"cmdline":  *cmdline,
-			"tap":      *tapName,
-			"nat":      *natMode,
+			"mem":       *memSize,
+			"cpu":       *numCPU,
+			"firmware":  *firmwarePath,
+			"kernel":    *kernelPath,
+			"initrd":    *initrdPath,
+			"iso":       *isoPath,
+			"cmdline":   *cmdline,
+			"tap":       *tapName,
+			"nat":       *natMode,
+			"vhost":     *vhostNet,
+			"vsock":     *vsockPort,
+			"vsock-cid": *vsockCID,
 		}
 		if len(blkdev) > 0 {
 			blocks := make([]string, len(blkdev))
@@ -240,6 +261,7 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		cmdline:        asString(payload, "cmdline", "console=hvc0 reboot=t"),
 		tap:            asString(payload, "tap", ""),
 		nat:            asBool(payload, "nat", false),
+		vhost:          asBool(payload, "vhost", false),
 		block:          asStringSlice(payload, "block"),
 	}
 	consoleSession.SetOnClose(func() {
@@ -262,6 +284,9 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		NumCPU:       asInt(payload, "cpu", 1),
 		TapName:      asString(payload, "tap", ""),
 		NATMode:      asBool(payload, "nat", false),
+		VhostNet:     asBool(payload, "vhost", false),
+		VSOCKCID:     uint64(asInt(payload, "vsock-cid", 0)),
+		VSOCKPort:    uint32(asInt(payload, "vsock", 0)),
 		ConsoleIn:    consoleSession,
 		ConsoleOut:   consoleSession,
 	})
@@ -271,6 +296,9 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	}
 	if netCfg.TapName != "" {
 		vmc.tap = netCfg.TapName
+	}
+	if netCfg.VhostNet {
+		vmc.vhost = true
 	}
 	if netCfg.NAT {
 		vmc.nat = true
@@ -407,6 +435,7 @@ type vmController struct {
 	cmdline        string
 	tap            string
 	nat            bool
+	vhost          bool
 	natSubnet      string
 	natGateway     string
 	natGuestIP     string
@@ -436,6 +465,7 @@ type vmStats struct {
 	Cmdline      string     `json:"cmdline,omitempty"`
 	Tap          string     `json:"tap,omitempty"`
 	NAT          bool       `json:"nat,omitempty"`
+	VhostNet     bool       `json:"vhost_net,omitempty"`
 	NATSubnet    string     `json:"nat_subnet,omitempty"`
 	NATGateway   string     `json:"nat_gateway,omitempty"`
 	NATGuestIP   string     `json:"nat_guest_ip,omitempty"`
@@ -559,6 +589,7 @@ func (c *vmController) snapshot(now time.Time) vmStats {
 		Cmdline:      c.cmdline,
 		Tap:          c.tap,
 		NAT:          c.nat,
+		VhostNet:     c.vhost,
 		NATSubnet:    c.natSubnet,
 		NATGateway:   c.natGateway,
 		NATGuestIP:   c.natGuestIP,

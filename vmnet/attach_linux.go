@@ -13,15 +13,19 @@ import (
 type Config struct {
 	TapName    string
 	NAT        bool
+	VhostNet   bool
 	NATSubnet  string
 	NATGateway string
 	NATGuestIP string
 	NICs       []NICStatsSource
 }
 
-func AttachDevice(cfg *vmm.Config, uid, tapName string, natMode bool) (Config, error) {
+func AttachDevice(cfg *vmm.Config, uid, tapName string, natMode bool, vhostNet bool) (Config, error) {
 	if natMode && tapName != "" {
 		return Config{}, errors.New("network: -nat and -tap are mutually exclusive")
+	}
+	if vhostNet && natMode {
+		return Config{}, errors.New("network: -vhost-net cannot be used with -nat")
 	}
 	if natMode {
 		backend, natCfg, err := nat.OpenBackend(uid)
@@ -40,7 +44,13 @@ func AttachDevice(cfg *vmm.Config, uid, tapName string, natMode bool) (Config, e
 		}, nil
 	}
 	if tapName == "" {
+		if vhostNet {
+			return Config{}, errors.New("network: -vhost-net requires -tap")
+		}
 		return Config{}, nil
+	}
+	if vhostNet {
+		return Config{}, errors.New("network: vhost-net is not implemented")
 	}
 
 	tap, name, err := virtio.OpenTAP(tapName)

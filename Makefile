@@ -16,6 +16,8 @@ build: build-vm build-client
 
 build-vm:
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(OUTDIR)/$(BIN) .
+	sudo chown root:root $(OUTDIR)/$(BIN)
+	sudo chmod u+s $(OUTDIR)/$(BIN)
 
 build-client:
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(OUTDIR)/$(CLIENT) ./cmd/kubevmctl

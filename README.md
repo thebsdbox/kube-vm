@@ -75,6 +75,7 @@ Useful direct flags:
 - `-block` repeatable block device spec (supports `:ro`)
 - `-tap` TAP interface name
 - `-nat` auto-create TAP with host NAT (Linux only, mutually exclusive with `-tap`)
+- `-vhost-net` request vhost-net acceleration for TAP networking (currently rejected; requires `-tap` and cannot be combined with `-nat`)
 
 ## Daemon Mode
 
@@ -135,6 +136,7 @@ Start-time flags accepted by `kube-vmctl`:
 - `-cpu`
 - `-tap`
 - `-nat` (Linux only, mutually exclusive with `-tap`)
+- `-vhost-net` (requires `-tap`; currently rejected)
 - `-block` (repeatable, supports `:ro`)
 - `-detach`
 
@@ -203,6 +205,8 @@ Attach virtio-net backed by TAP:
 ```
 
 If TAP does not exist, kube-vm attempts to create it via `/dev/net/tun`.
+
+`-vhost-net` is accepted by both `kube-vm` and `kube-vmctl`, but current builds reject it at runtime because kernel vhost queue wiring has not been implemented yet.
 
 ## Networking (NAT)
 
