@@ -29,6 +29,9 @@ type Options struct {
 	NumCPU       int
 	TapName      string
 	NATMode      bool
+	VhostNet     bool
+	VSOCKCID     uint64
+	VSOCKPort    uint32
 	ConsoleIn    io.Reader
 	ConsoleOut   io.Writer
 }
@@ -102,9 +105,24 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 		cfg.Devices = append(cfg.Devices, isoDev)
 	}
 
-	netCfg, err := vmnet.AttachDevice(&cfg, opts.UID, opts.TapName, opts.NATMode)
+	netCfg, err := vmnet.AttachDevice(&cfg, opts.UID, opts.TapName, opts.NATMode, opts.VhostNet)
 	if err != nil {
 		return vmm.Config{}, vmnet.Config{}, err
+	}
+
+	if opts.VSOCKPort != 0 {
+		cid := opts.VSOCKCID
+		if cid == 0 {
+			cid = 3
+		}
+		if cid <= 2 {
+			return vmm.Config{}, vmnet.Config{}, fmt.Errorf("kube-vm: virtio-vsock guest CID must be > 2")
+		}
+		backend, err := virtio.OpenVSOCK(opts.VSOCKPort)
+		if err != nil {
+			return vmm.Config{}, vmnet.Config{}, err
+		}
+		cfg.Devices = append(cfg.Devices, &virtio.VSockDevice{GuestCID: cid, Backend: backend})
 	}
 
 	if opts.ConsoleIn != nil && opts.ConsoleOut != nil {

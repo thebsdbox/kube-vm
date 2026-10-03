@@ -42,6 +42,7 @@ func parseStartRequest(r *http.Request) (string, map[string]any, error) {
 	copyFormValue(payload, r, "cmdline")
 	copyFormValue(payload, r, "tap")
 	copyFormValue(payload, r, "nat")
+	copyFormValue(payload, r, "vhost")
 	copyFormValue(payload, r, "mem")
 	copyFormValue(payload, r, "cpu")
 

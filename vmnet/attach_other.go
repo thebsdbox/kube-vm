@@ -12,15 +12,19 @@ import (
 type Config struct {
 	TapName    string
 	NAT        bool
+	VhostNet   bool
 	NATSubnet  string
 	NATGateway string
 	NATGuestIP string
 	NICs       []NICStatsSource
 }
 
-func AttachDevice(cfg *vmm.Config, uid, tapName string, natMode bool) (Config, error) {
+func AttachDevice(cfg *vmm.Config, uid, tapName string, natMode bool, vhostNet bool) (Config, error) {
 	if natMode {
 		return Config{}, errors.New("nat networking is only supported on linux")
+	}
+	if vhostNet {
+		return Config{}, errors.New("vhost-net is only supported on linux")
 	}
 	if tapName == "" {
 		return Config{}, nil

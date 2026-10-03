@@ -50,7 +50,7 @@ const frontendHTML = `<!doctype html>
 			background: radial-gradient(circle at 15% 10%, rgba(46, 169, 143, 0.16) 0%, rgba(16,22,28,0) 40%), radial-gradient(circle at 85% 0%, rgba(229,141,71,0.12) 0%, rgba(16,22,28,0) 45%), linear-gradient(180deg, #0f151b 0%, #10161c 100%);
 		}
     @keyframes reveal { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-    .wrap { max-width: 1160px; margin: 0 auto; display: grid; gap: 16px; }
+	.wrap { width: 90%; max-width: none; margin: 0 auto; display: grid; gap: 16px; }
     .title { margin: 0; font-size: clamp(1.4rem, 2.8vw, 2.2rem); letter-spacing: 0.01em; }
     .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 0.95rem; }
     .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
@@ -121,8 +121,12 @@ const frontendHTML = `<!doctype html>
 						<input id="start-nat" name="nat" type="checkbox" style="width:auto;" />
 						<label for="start-nat" style="margin:0;">Enable NAT networking</label>
 					</div>
+					<div style="display:flex; align-items:center; gap:8px; margin-top:18px;">
+						<input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" />
+						<label for="start-vhost" style="margin:0;">Request vhost-net acceleration</label>
+					</div>
           </div>
-					<div class="status">NAT and TAP are mutually exclusive. Leave TAP empty when NAT is enabled.</div>
+					<div class="status">NAT and TAP are mutually exclusive. vhost-net requires TAP and is currently rejected if requested.</div>
           <div style="margin-top:10px"><label>Cmdline</label><input name="cmdline" value="console=hvc0 reboot=t" /></div>
           <div style="margin-top:10px"><label>Block devices (comma or newline separated)</label><textarea name="block"></textarea></div>
 					<div style="margin-top:10px; display:flex; align-items:center; gap:8px;">
@@ -134,6 +138,29 @@ const frontendHTML = `<!doctype html>
         </form>
       </div>
     </section>
+
+		<section class="panel">
+			<h2>Saved VM Configurations</h2>
+			<div class="content">
+				<div class="grid">
+					<div>
+						<label>Configuration name</label>
+						<input id="config-name" placeholder="example: ubuntu-ci" />
+					</div>
+				</div>
+				<div class="actions">
+					<button class="primary" id="config-save" type="button">Save Current Form</button>
+					<button class="ghost" id="config-clear-recent" type="button">Clear Recent</button>
+				</div>
+				<div class="status" id="config-status"></div>
+				<div style="margin-top:10px; overflow:auto;">
+					<table>
+						<thead><tr><th>Name</th><th>Type</th><th>Summary</th><th>Saved</th><th>Actions</th></tr></thead>
+						<tbody id="config-rows"></tbody>
+					</table>
+				</div>
+			</div>
+		</section>
 
     <section class="panel">
       <h2>Virtual Machines</h2>
@@ -171,13 +198,20 @@ const frontendHTML = `<!doctype html>
   <script>
     const cards = document.getElementById('cards');
     const rows = document.getElementById('vm-rows');
+    const startFormEl = document.getElementById('start-form');
     const statusEl = document.getElementById('status');
 	const startConnectEl = document.getElementById('start-connect');
     const tokenEl = document.getElementById('token');
 	const themeToggleEl = document.getElementById('theme-toggle');
 	const natModeEl = document.getElementById('start-nat');
+	const vhostNetEl = document.getElementById('start-vhost');
 	const tapInputEl = document.querySelector('input[name="tap"]');
 	const cmdlineInputEl = document.querySelector('input[name="cmdline"]');
+	const configNameEl = document.getElementById('config-name');
+	const configRowsEl = document.getElementById('config-rows');
+	const configStatusEl = document.getElementById('config-status');
+	const configSaveEl = document.getElementById('config-save');
+	const configClearRecentEl = document.getElementById('config-clear-recent');
 	const consoleTermEl = document.getElementById('console-terminal');
 	const consoleHint = document.getElementById('console-hint');
     const consoleUID = document.getElementById('console-uid');
@@ -193,6 +227,10 @@ const frontendHTML = `<!doctype html>
 	let inputFlushTimer = null;
 	let fallbackMode = false;
 	let consoleDecoder = createConsoleDecoder();
+	const savedConfigKey = 'kubevm_web_saved_configs_v1';
+	const recentConfigKey = 'kubevm_web_recent_configs_v1';
+	let refreshNetworkModeUI = function() {};
+	let skipRememberRecentOnce = false;
 
     tokenEl.value = localStorage.getItem('kubevm_web_token') || '';
     tokenEl.addEventListener('change', () => localStorage.setItem('kubevm_web_token', tokenEl.value.trim()));
@@ -206,8 +244,14 @@ const frontendHTML = `<!doctype html>
 			});
 		}
 		if (natModeEl && tapInputEl) {
-			const updateNetworkModeUI = function() {
+			refreshNetworkModeUI = function() {
 				tapInputEl.disabled = natModeEl.checked;
+				if (vhostNetEl) {
+					vhostNetEl.disabled = natModeEl.checked;
+					if (natModeEl.checked) {
+						vhostNetEl.checked = false;
+					}
+				}
 				if (natModeEl.checked) {
 					tapInputEl.value = '';
 					tapInputEl.placeholder = 'disabled while NAT is enabled';
@@ -215,8 +259,223 @@ const frontendHTML = `<!doctype html>
 					tapInputEl.placeholder = '';
 				}
 			};
-			natModeEl.addEventListener('change', updateNetworkModeUI);
-			updateNetworkModeUI();
+			natModeEl.addEventListener('change', refreshNetworkModeUI);
+			refreshNetworkModeUI();
+		}
+
+		function nowISO() {
+			return new Date().toISOString();
+		}
+
+		function safeParseJSON(raw, fallback) {
+			try {
+				const parsed = JSON.parse(raw);
+				return parsed == null ? fallback : parsed;
+			} catch (_) {
+				return fallback;
+			}
+		}
+
+		function loadSavedConfigs() {
+			return safeParseJSON(localStorage.getItem(savedConfigKey) || '[]', []);
+		}
+
+		function saveSavedConfigs(items) {
+			localStorage.setItem(savedConfigKey, JSON.stringify(items || []));
+		}
+
+		function loadRecentConfigs() {
+			return safeParseJSON(localStorage.getItem(recentConfigKey) || '[]', []);
+		}
+
+		function saveRecentConfigs(items) {
+			localStorage.setItem(recentConfigKey, JSON.stringify(items || []));
+		}
+
+		function normalizeConfigPayload(cfg) {
+			return {
+				uid: String(cfg.uid || '').trim(),
+				mem: String(cfg.mem || '').trim(),
+				cpu: String(cfg.cpu || '').trim(),
+				kernel: String(cfg.kernel || '').trim(),
+				initrd: String(cfg.initrd || '').trim(),
+				firmware: String(cfg.firmware || '').trim(),
+				iso: String(cfg.iso || '').trim(),
+				tap: String(cfg.tap || '').trim(),
+				nat: !!cfg.nat,
+				vhost: !!cfg.vhost,
+				cmdline: String(cfg.cmdline || '').trim(),
+				block: String(cfg.block || '').trim()
+			};
+		}
+
+		function collectFormConfig() {
+			const fd = new FormData(startFormEl);
+			return normalizeConfigPayload({
+				uid: fd.get('uid'),
+				mem: fd.get('mem'),
+				cpu: fd.get('cpu'),
+				kernel: fd.get('kernel'),
+				initrd: fd.get('initrd'),
+				firmware: fd.get('firmware'),
+				iso: fd.get('iso'),
+				tap: fd.get('tap'),
+				nat: !!(natModeEl && natModeEl.checked),
+				vhost: !!(vhostNetEl && vhostNetEl.checked),
+				cmdline: fd.get('cmdline'),
+				block: fd.get('block')
+			});
+		}
+
+		function applyFormConfig(cfg) {
+			if (!startFormEl || !cfg) {
+				return;
+			}
+			const fields = ['uid', 'mem', 'cpu', 'kernel', 'initrd', 'firmware', 'iso', 'tap', 'cmdline', 'block'];
+			for (const key of fields) {
+				const el = startFormEl.elements.namedItem(key);
+				if (el && typeof el.value !== 'undefined') {
+					el.value = cfg[key] || '';
+				}
+			}
+			if (natModeEl) {
+				natModeEl.checked = !!cfg.nat;
+			}
+			if (vhostNetEl) {
+				vhostNetEl.checked = !!cfg.vhost;
+			}
+			refreshNetworkModeUI();
+		}
+
+		function configSummary(cfg) {
+			const network = cfg.nat ? 'nat' : (cfg.tap ? 'tap:' + cfg.tap + (cfg.vhost ? ' vhost' : '') : 'none');
+			return 'mem ' + (cfg.mem || 'n/a') + ' MiB, cpu ' + (cfg.cpu || 'n/a') + ', ' + network + ', kernel ' + (cfg.kernel || 'n/a');
+		}
+
+		function newConfigID() {
+			return String(Date.now()) + '-' + String(Math.floor(Math.random() * 100000));
+		}
+
+		function renderConfigRows() {
+			if (!configRowsEl) {
+				return;
+			}
+			const saved = loadSavedConfigs();
+			const recent = loadRecentConfigs();
+			const rows = [];
+			for (const item of saved) {
+				rows.push({ source: 'saved', item: item });
+			}
+			for (const item of recent) {
+				rows.push({ source: 'recent', item: item });
+			}
+			rows.sort(function(a, b) {
+				const at = String(a.item.updated_at || a.item.created_at || '');
+				const bt = String(b.item.updated_at || b.item.created_at || '');
+				if (at > bt) return -1;
+				if (at < bt) return 1;
+				return 0;
+			});
+
+			configRowsEl.innerHTML = '';
+			if (rows.length === 0) {
+				configRowsEl.innerHTML = '<tr><td colspan="5" class="mono">No saved or recent VM configurations yet.</td></tr>';
+				return;
+			}
+
+			for (const rec of rows) {
+				const cfg = normalizeConfigPayload(rec.item.payload || {});
+				const tr = document.createElement('tr');
+				const savedAt = rec.item.updated_at || rec.item.created_at || '';
+				tr.innerHTML =
+					'<td class="mono">' + (rec.item.name || 'unnamed') + '</td>' +
+					'<td class="mono">' + rec.source + '</td>' +
+					'<td class="mono">' + configSummary(cfg) + '</td>' +
+					'<td class="mono">' + savedAt + '</td>' +
+					'<td>' +
+					'<button class="ghost" data-load="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Load</button> ' +
+					'<button class="primary" data-start="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Start</button> ' +
+					'<button class="warn" data-delete="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Delete</button>' +
+					'</td>';
+
+				tr.querySelector('button[data-load]').addEventListener('click', function() {
+					applyFormConfig(cfg);
+					if (configStatusEl) {
+						configStatusEl.textContent = 'loaded config "' + (rec.item.name || 'unnamed') + '"';
+					}
+				});
+
+				tr.querySelector('button[data-start]').addEventListener('click', async function() {
+					applyFormConfig(cfg);
+					if (startFormEl) {
+						skipRememberRecentOnce = true;
+						startFormEl.requestSubmit();
+					}
+				});
+
+				tr.querySelector('button[data-delete]').addEventListener('click', function() {
+					if (rec.source === 'saved') {
+						saveSavedConfigs(loadSavedConfigs().filter(function(x) { return x.id !== rec.item.id; }));
+					} else {
+						saveRecentConfigs(loadRecentConfigs().filter(function(x) { return x.id !== rec.item.id; }));
+					}
+					renderConfigRows();
+					if (configStatusEl) {
+						configStatusEl.textContent = 'deleted config "' + (rec.item.name || 'unnamed') + '"';
+					}
+				});
+
+				configRowsEl.appendChild(tr);
+			}
+		}
+
+		function saveCurrentConfig() {
+			const cfg = collectFormConfig();
+			const name = String((configNameEl && configNameEl.value) || '').trim();
+			if (name === '') {
+				if (configStatusEl) {
+					configStatusEl.textContent = 'enter a configuration name before saving';
+				}
+				return;
+			}
+			const now = nowISO();
+			const items = loadSavedConfigs();
+			const existing = items.find(function(x) { return String(x.name || '').toLowerCase() === name.toLowerCase(); });
+			if (existing) {
+				existing.payload = cfg;
+				existing.updated_at = now;
+			} else {
+				items.unshift({
+					id: newConfigID(),
+					name: name,
+					payload: cfg,
+					created_at: now,
+					updated_at: now
+				});
+			}
+			saveSavedConfigs(items.slice(0, 40));
+			renderConfigRows();
+			if (configStatusEl) {
+				configStatusEl.textContent = 'saved config "' + name + '"';
+			}
+		}
+
+		function rememberRecentConfig(cfg, uid) {
+			const now = nowISO();
+			const payload = normalizeConfigPayload(cfg || {});
+			const key = JSON.stringify(payload);
+			let items = loadRecentConfigs().filter(function(x) {
+				return JSON.stringify(normalizeConfigPayload((x && x.payload) || {})) !== key;
+			});
+			items.unshift({
+				id: newConfigID(),
+				name: uid ? ('run:' + uid) : 'recent',
+				payload: payload,
+				created_at: now,
+				updated_at: now
+			});
+			saveRecentConfigs(items.slice(0, 20));
+			renderConfigRows();
 		}
 
 		function ensureDHCPInCmdline(cmdline, natEnabled) {
@@ -335,7 +594,7 @@ const frontendHTML = `<!doctype html>
 				return 'nat ' + subnet + ' gw:' + gw + ' ip:' + gip + ' tap:' + tap;
 			}
 			if (vm.tap) {
-				return 'tap ' + vm.tap;
+				return 'tap ' + vm.tap + (vm.vhost_net ? ' vhost' : '');
 			}
 			return 'none';
 		}
@@ -449,9 +708,27 @@ const frontendHTML = `<!doctype html>
 					return true;
 				}
 				const key = (ev.key || '').toLowerCase();
+				const hasSelection = !!(term && typeof term.hasSelection === 'function' && term.hasSelection());
 
 				if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && key === 'l') {
 					term.clear();
+					ev.preventDefault();
+					return false;
+				}
+
+				if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && key === 'c') {
+					if (hasSelection || !consoleSessionID) {
+						return true;
+					}
+					queueConsoleInput('\x03');
+					ev.preventDefault();
+					return false;
+				}
+
+				if (!ev.ctrlKey && !ev.metaKey && key === 'delete') {
+					if (consoleSessionID) {
+						queueConsoleInput('\x1b[3~');
+					}
 					ev.preventDefault();
 					return false;
 				}
@@ -538,6 +815,8 @@ const frontendHTML = `<!doctype html>
 						out = '\r';
 					} else if (ev.key === 'Backspace') {
 						out = '\x7f';
+					} else if (ev.key === 'Delete') {
+						out = '\x1b[3~';
 					} else if (ev.key === 'Tab') {
 						out = '\t';
 					} else if (ev.key === 'ArrowUp') {
@@ -879,13 +1158,15 @@ const frontendHTML = `<!doctype html>
 			}
     }
 
-    document.getElementById('start-form').addEventListener('submit', async (ev) => {
+    startFormEl.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       statusEl.textContent = 'starting vm...';
       const fd = new FormData(ev.target);
+			const runConfig = collectFormConfig();
 			if (natModeEl && natModeEl.checked) {
 				const fixedCmdline = ensureDHCPInCmdline(fd.get('cmdline'), true);
 				fd.set('cmdline', fixedCmdline);
+				runConfig.cmdline = fixedCmdline;
 				if (cmdlineInputEl) {
 					cmdlineInputEl.value = fixedCmdline;
 				}
@@ -896,6 +1177,11 @@ const frontendHTML = `<!doctype html>
       }
       const body = await api('/api/v1/vms/start', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: payload.toString() });
       statusEl.textContent = 'started ' + body.uid;
+			if (skipRememberRecentOnce) {
+				skipRememberRecentOnce = false;
+			} else {
+				rememberRecentConfig(runConfig, body.uid);
+			}
       await refresh();
 			if (startConnectEl && startConnectEl.checked && body.uid) {
 				consoleUID.value = body.uid;
@@ -907,9 +1193,18 @@ const frontendHTML = `<!doctype html>
 		document.getElementById('console-open').addEventListener('click', () => openConsole().catch(err => consoleStatus.textContent = err.message));
     document.getElementById('console-close').addEventListener('click', () => closeConsole().catch(err => consoleStatus.textContent = err.message));
 		document.getElementById('console-fallback-send').addEventListener('click', () => sendFallbackInput().catch(err => consoleStatus.textContent = err.message));
+		configSaveEl.addEventListener('click', saveCurrentConfig);
+		configClearRecentEl.addEventListener('click', () => {
+			saveRecentConfigs([]);
+			renderConfigRows();
+			if (configStatusEl) {
+				configStatusEl.textContent = 'cleared recent configuration history';
+			}
+		});
 
 		initTheme();
 		ensureTerminal();
+		renderConfigRows();
     refresh().catch(err => statusEl.textContent = err.message);
     setInterval(() => refresh().catch(() => {}), 5000);
   </script>
