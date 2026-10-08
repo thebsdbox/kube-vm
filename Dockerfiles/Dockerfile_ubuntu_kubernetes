@@ -1,0 +1,36 @@
+FROM ubuntu:systemd
+
+ARG K8S_VERSION="v1.37"
+
+# Missing deps
+RUN apt-get update -y; apt-get install -y apt-transport-https ca-certificates curl gpg gnupg
+
+# Enable apt repositories.
+# Add Kubernetes apt repository
+RUN curl -fsSL https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+RUN echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+#RUN apt-get update -y; apt-get install -y kubelet=${K8S_VERSION}-00 kubectl=${K8S_VERSION}-00 kubeadm=${K8S_VERSION}-00
+RUN apt-get update -y; apt-get install -y kubelet kubectl kubeadm containerd
+
+# Setup required sysctl params, these persist across reboots.
+RUN <<EOF cat >> /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+RUN sudo mkdir -p /etc/containerd
+RUN <<EOF cat >> /etc/containerd/config.toml
+version = 2
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    [plugins."io.containerd.grpc.v1.cri".containerd]
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
+            
+EOF
+RUN sudo systemctl enable containerd
+CMD ["/lib/systemd/systemd"]
