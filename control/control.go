@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,46 @@ import (
 	"syscall"
 	"time"
 )
+
+const consoleHistoryLimit = 500
+
+type consoleHistory struct {
+	lines   [][]byte
+	partial []byte
+}
+
+func (h *consoleHistory) append(p []byte) {
+	for len(p) > 0 {
+		idx := bytes.IndexByte(p, '\n')
+		if idx < 0 {
+			h.partial = append(h.partial, p...)
+			return
+		}
+
+		h.partial = append(h.partial, p[:idx+1]...)
+		h.lines = append(h.lines, append([]byte(nil), h.partial...))
+		if len(h.lines) > consoleHistoryLimit {
+			over := len(h.lines) - consoleHistoryLimit
+			copy(h.lines, h.lines[over:])
+			h.lines = h.lines[:consoleHistoryLimit]
+		}
+		h.partial = h.partial[:0]
+		p = p[idx+1:]
+	}
+}
+
+func (h *consoleHistory) snapshot() []byte {
+	size := len(h.partial)
+	for _, line := range h.lines {
+		size += len(line)
+	}
+	out := make([]byte, 0, size)
+	for _, line := range h.lines {
+		out = append(out, line...)
+	}
+	out = append(out, h.partial...)
+	return out
+}
 
 // Handler exposes the operations that a VM server must implement.
 type Handler interface {
@@ -271,10 +312,12 @@ func sendResponse(conn net.Conn, resp Response) error {
 type ConsoleSession struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
+	writeMu sync.Mutex
 	conn    net.Conn
 	closed  bool
 	dropped bool
 	onClose func()
+	history consoleHistory
 }
 
 func NewConsoleSession() *ConsoleSession {
@@ -284,21 +327,43 @@ func NewConsoleSession() *ConsoleSession {
 }
 
 func (s *ConsoleSession) SetConn(conn net.Conn) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		_ = conn.Close()
 		return
 	}
+	oldConn := s.conn
 	if s.conn != nil {
 		fmt.Fprintf(os.Stderr, "kube-vm: console session: replacing existing client %s with %s\n", s.conn.RemoteAddr(), conn.RemoteAddr())
-		_ = s.conn.Close()
 	} else {
 		fmt.Fprintf(os.Stderr, "kube-vm: console session: client attached %s\n", conn.RemoteAddr())
 	}
 	s.conn = conn
 	s.dropped = false
+	history := s.history.snapshot()
 	s.cond.Broadcast()
+	s.mu.Unlock()
+
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
+	if len(history) == 0 {
+		return
+	}
+	if _, err := writeAll(conn, history); err != nil && isConsoleConnError(err) {
+		s.mu.Lock()
+		if s.conn == conn {
+			s.conn = nil
+			s.dropped = false
+		}
+		s.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while replaying history (%v); waiting for reattach\n", err)
+		_ = conn.Close()
+	}
 }
 
 func (s *ConsoleSession) SetOnClose(fn func()) {
@@ -308,9 +373,11 @@ func (s *ConsoleSession) SetOnClose(fn func()) {
 }
 
 func (s *ConsoleSession) Close() error {
+	s.writeMu.Lock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		s.writeMu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -324,6 +391,7 @@ func (s *ConsoleSession) Close() error {
 	s.onClose = nil
 	s.cond.Broadcast()
 	s.mu.Unlock()
+	s.writeMu.Unlock()
 	if fn != nil {
 		fn()
 	}
@@ -360,29 +428,32 @@ func (s *ConsoleSession) Read(p []byte) (int, error) {
 }
 
 func (s *ConsoleSession) Write(p []byte) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return 0, io.EOF
 	}
+	s.history.append(p)
 	conn := s.conn
 	dropped := s.dropped
-	s.mu.Unlock()
 
 	if conn == nil {
 		if !dropped {
-			s.mu.Lock()
 			if !s.closed && s.conn == nil && !s.dropped {
 				s.dropped = true
-				fmt.Fprintln(os.Stderr, "kube-vm: console session: no client attached; dropping console output until a client connects")
+				fmt.Fprintln(os.Stderr, "kube-vm: console session: no client attached; buffering console output until a client connects")
 			}
-			s.mu.Unlock()
 		}
+		s.mu.Unlock()
 		return len(p), nil
 	}
+	s.mu.Unlock()
 
-	n, err := conn.Write(p)
-	if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
+	n, err := writeAll(conn, p)
+	if err != nil && isConsoleConnError(err) {
 		s.mu.Lock()
 		if s.conn == conn {
 			s.conn = nil
@@ -395,6 +466,31 @@ func (s *ConsoleSession) Write(p []byte) (int, error) {
 	}
 
 	return n, err
+}
+
+func isConsoleConnError(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, os.ErrClosed) ||
+		errors.Is(err, syscall.EBADF) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
+
+func writeAll(w io.Writer, p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		n, err := w.Write(p[written:])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
 }
 
 func ServeConsole(ctx context.Context, socketPath string, session *ConsoleSession) error {

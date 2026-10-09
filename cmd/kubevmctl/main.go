@@ -8,11 +8,19 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/term"
 
 	"kube-vm/control"
@@ -23,6 +31,21 @@ import (
 const consoleDetachByte = 0x1d // Ctrl+]
 
 var errConsoleDetach = errors.New("kubevmctl: console detached")
+
+var controlDial = control.Dial
+var sshAuthMethodsProvider = defaultSSHAuthMethods
+var sshHostKeyCallbackProvider = defaultSSHHostKeyCallback
+var sshHostKeyPrompter = promptSSHHostKey
+var sshPasswordPrompter = promptSSHPassword
+var sshCommandRunner = runSSHCommand
+
+type sshInvocation struct {
+	Host    string
+	User    string
+	Port    int
+	Command []string
+	IgnoreHostKey bool
+}
 
 var (
 	socketPath string
@@ -66,6 +89,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newPauseCmd())
 	rootCmd.AddCommand(newResumeCmd())
 	rootCmd.AddCommand(newConsoleCmd())
+	rootCmd.AddCommand(newSSHCmd())
 	rootCmd.AddCommand(newStopCmd())
 	rootCmd.AddCommand(newSaveCmd())
 	rootCmd.AddCommand(newRestoreCmd())
@@ -139,7 +163,7 @@ func newListCmd() *cobra.Command {
 		Short: "List running VMs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := control.Dial(socketPath, "list", nil)
+			resp, err := controlDial(socketPath, "list", nil)
 			if err != nil {
 				return err
 			}
@@ -180,7 +204,7 @@ func newExamineCmd() *cobra.Command {
 			if uid == "" {
 				return fmt.Errorf("uid is required")
 			}
-			resp, err := control.Dial(socketPath, "examine", map[string]any{"uid": uid})
+			resp, err := controlDial(socketPath, "examine", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -254,7 +278,7 @@ func newStatusCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := control.Dial(socketPath, "status", map[string]any{"uid": uid})
+			resp, err := controlDial(socketPath, "status", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -315,7 +339,7 @@ func newStartCmd() *cobra.Command {
 			if uid != "" {
 				payload["uid"] = uid
 			}
-			resp, err := control.Dial(socketPath, "start", payload)
+			resp, err := controlDial(socketPath, "start", payload)
 			if err != nil {
 				return err
 			}
@@ -359,7 +383,7 @@ func newPauseCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := control.Dial(socketPath, "pause", map[string]any{"uid": uid})
+			resp, err := controlDial(socketPath, "pause", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -385,7 +409,7 @@ func newResumeCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := control.Dial(socketPath, "resume", map[string]any{"uid": uid})
+			resp, err := controlDial(socketPath, "resume", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -414,13 +438,40 @@ func newConsoleCmd() *cobra.Command {
 			if uid == "" {
 				return fmt.Errorf("uid is required")
 			}
-			_, err := control.Dial(socketPath, "connect", map[string]any{"uid": uid})
+			_, err := controlDial(socketPath, "connect", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
 			return attachConsole(socketPath, uid)
 		},
 	}
+	return cmd
+}
+
+func newSSHCmd() *cobra.Command {
+	var sshUser string
+	var sshPort int
+	var ignoreHostKey bool
+	cmd := &cobra.Command{
+		Use:                   "ssh <uid-or-ip> [-- remote-command ...]",
+		Short:                 "Open an SSH session to a VM by UID or IP address",
+		Args:                  cobra.MinimumNArgs(1),
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			host, err := resolveSSHTarget(socketPath, args[0], sshUser)
+			if err != nil {
+				return err
+			}
+			invocation := sshInvocation{Host: host, User: sshUser, Port: sshPort, IgnoreHostKey: ignoreHostKey}
+			if len(args) > 1 {
+				invocation.Command = append([]string(nil), args[1:]...)
+			}
+			return sshCommandRunner(invocation)
+		},
+	}
+	cmd.Flags().StringVarP(&sshUser, "user", "l", "", "SSH username to prepend to the destination")
+	cmd.Flags().IntVarP(&sshPort, "port", "p", 22, "SSH port")
+	cmd.Flags().BoolVar(&ignoreHostKey, "insecure-ignore-host-key", false, "skip SSH host key verification")
 	return cmd
 }
 
@@ -433,7 +484,7 @@ func newStopCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := control.Dial(socketPath, "shutdown", map[string]any{"uid": uid})
+			resp, err := controlDial(socketPath, "shutdown", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -463,7 +514,7 @@ func newSaveCmd() *cobra.Command {
 			if err != nil || path == "" {
 				return fmt.Errorf("save requires --path")
 			}
-			resp, err := control.Dial(socketPath, "save", map[string]any{"uid": uid, "path": path})
+			resp, err := controlDial(socketPath, "save", map[string]any{"uid": uid, "path": path})
 			if err != nil {
 				return err
 			}
@@ -494,7 +545,7 @@ func newRestoreCmd() *cobra.Command {
 			if err != nil || path == "" {
 				return fmt.Errorf("restore requires --path")
 			}
-			resp, err := control.Dial(socketPath, "restore", map[string]any{"uid": uid, "path": path})
+			resp, err := controlDial(socketPath, "restore", map[string]any{"uid": uid, "path": path})
 			if err != nil {
 				return err
 			}
@@ -519,11 +570,409 @@ func main() {
 	}
 }
 
+func resolveSSHTarget(socketPath, target, user string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("ssh target is required")
+	}
+
+	host := target
+	if ip := net.ParseIP(target); ip == nil {
+		resp, err := controlDial(socketPath, "examine", map[string]any{"uid": target})
+		if err != nil {
+			return "", err
+		}
+		if !resp.OK {
+			if resp.Error != "" {
+				return "", fmt.Errorf("%s", resp.Error)
+			}
+			return "", fmt.Errorf("control request failed")
+		}
+		if resp.VM == nil {
+			return "", fmt.Errorf("control request returned no VM details")
+		}
+		host = strings.TrimSpace(resp.VM.NATGuestIP)
+		if host == "" {
+			return "", fmt.Errorf("vm %s does not have a guest IP address", target)
+		}
+	}
+
+	if user == "" {
+		return host, nil
+	}
+	return host, nil
+}
+
+func runSSHCommand(invocation sshInvocation) error {
+	sshUser, err := resolveSSHUser(invocation.User)
+	if err != nil {
+		return err
+	}
+	invocation.User = sshUser
+
+	authMethods, cleanup, err := sshAuthMethodsProvider(invocation)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	hostKeyCallback, err := sshHostKeyCallbackProvider(invocation)
+	if err != nil {
+		return err
+	}
+
+	client, err := ssh.Dial("tcp", net.JoinHostPort(invocation.Host, strconv.Itoa(invocation.Port)), &ssh.ClientConfig{
+		User:            sshUser,
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("ssh dial %s: %w", invocation.Host, err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("ssh session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = os.Stdin
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+
+	usePTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	var stopResize func()
+	if usePTY {
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("ssh raw terminal: %w", err)
+		}
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+		width, height, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			width, height = 80, 24
+		}
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
+		termType := os.Getenv("TERM")
+		if termType == "" {
+			termType = "xterm-256color"
+		}
+		if err := session.RequestPty(termType, height, width, modes); err != nil {
+			return fmt.Errorf("ssh request pty: %w", err)
+		}
+		stopResize = forwardSSHWindowChanges(session, int(os.Stdout.Fd()))
+		defer stopResize()
+	}
+
+	if len(invocation.Command) == 0 {
+		if err := session.Shell(); err != nil {
+			return fmt.Errorf("ssh shell: %w", err)
+		}
+		return session.Wait()
+	}
+
+	return session.Run(shellQuoteArgs(invocation.Command))
+}
+
+func resolveSSHUser(explicit string) (string, error) {
+	explicit = strings.TrimSpace(explicit)
+	if explicit != "" {
+		return explicit, nil
+	}
+	if envUser := strings.TrimSpace(os.Getenv("USER")); envUser != "" {
+		return envUser, nil
+	}
+	currentUser, err := user.Current()
+	if err == nil && strings.TrimSpace(currentUser.Username) != "" {
+		return currentUser.Username, nil
+	}
+	return "", fmt.Errorf("ssh user is required; use --user")
+}
+
+func defaultSSHAuthMethods(invocation sshInvocation) ([]ssh.AuthMethod, func(), error) {
+	methods := make([]ssh.AuthMethod, 0, 4)
+	cleanups := make([]func(), 0, 1)
+	passwordProvider := newSSHPasswordProvider(invocation)
+
+	if agentSock := strings.TrimSpace(os.Getenv("SSH_AUTH_SOCK")); agentSock != "" {
+		agentConn, err := net.Dial("unix", agentSock)
+		if err == nil {
+			agentClient := agent.NewClient(agentConn)
+			methods = append(methods, ssh.PublicKeysCallback(agentClient.Signers))
+			cleanups = append(cleanups, func() { _ = agentConn.Close() })
+		}
+	}
+
+	for _, path := range defaultSSHKeyPaths() {
+		signer, err := readSSHSigner(path)
+		if err != nil {
+			continue
+		}
+		methods = append(methods, ssh.PublicKeys(signer))
+	}
+
+	methods = append(methods,
+		ssh.PasswordCallback(passwordProvider),
+		ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+			password, err := passwordProvider()
+			if err != nil {
+				return nil, err
+			}
+			answers := make([]string, len(questions))
+			for i := range questions {
+				answers[i] = password
+			}
+			return answers, nil
+		}),
+	)
+
+	cleanup := func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+	return methods, cleanup, nil
+}
+
+func newSSHPasswordProvider(invocation sshInvocation) func() (string, error) {
+	var mu sync.Mutex
+	var cached string
+	var cachedErr error
+	var resolved bool
+
+	return func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if resolved {
+			return cached, cachedErr
+		}
+		resolved = true
+		cached, cachedErr = resolveSSHPassword(invocation)
+		return cached, cachedErr
+	}
+}
+
+func resolveSSHPassword(invocation sshInvocation) (string, error) {
+	if password := os.Getenv("KUBEVM_SSH_PASSWORD"); password != "" {
+		return password, nil
+	}
+	return sshPasswordPrompter(invocation)
+}
+
+func promptSSHPassword(invocation sshInvocation) (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("no SSH authentication methods available; set SSH_AUTH_SOCK, add a key under ~/.ssh, set KUBEVM_SSH_PASSWORD, or run from a terminal to enter a password")
+	}
+	defer tty.Close()
+
+	if _, err := fmt.Fprintf(tty, "%s@%s password: ", invocation.User, invocation.Host); err != nil {
+		return "", fmt.Errorf("prompt SSH password: %w", err)
+	}
+	password, err := term.ReadPassword(int(tty.Fd()))
+	if _, printErr := fmt.Fprintln(tty); printErr != nil && err == nil {
+		err = printErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("read SSH password: %w", err)
+	}
+	return string(password), nil
+}
+
+func defaultSSHKeyPaths() []string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		return nil
+	}
+	sshDir := filepath.Join(homeDir, ".ssh")
+	return []string{
+		filepath.Join(sshDir, "id_ed25519"),
+		filepath.Join(sshDir, "id_ecdsa"),
+		filepath.Join(sshDir, "id_rsa"),
+	}
+}
+
+func readSSHSigner(path string) (ssh.Signer, error) {
+	keyData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.ParsePrivateKey(keyData)
+}
+
+func defaultSSHHostKeyCallback(invocation sshInvocation) (ssh.HostKeyCallback, error) {
+	if invocation.IgnoreHostKey || shouldIgnoreSSHHostKey() {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+	knownHostsPath := filepath.Join(homeDir, ".ssh", "known_hosts")
+	callback, err := knownhosts.New(knownHostsPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("load known_hosts: %w", err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if callback != nil {
+			err := callback(hostname, remote, key)
+			if err == nil {
+				return nil
+			}
+			var keyErr *knownhosts.KeyError
+			if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
+				return err
+			}
+		}
+
+		accepted, err := approveUnknownSSHHost(hostname, key)
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			return fmt.Errorf("knownhosts: key is unknown")
+		}
+		if err := appendKnownHost(knownHostsPath, hostname, key); err != nil {
+			return err
+		}
+		return nil
+	}, nil
+}
+
+func shouldIgnoreSSHHostKey() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KUBEVM_SSH_IGNORE_HOST_KEY"))) {
+	case "1", "true", "yes", "y":
+		return true
+	default:
+		return false
+	}
+}
+
+func approveUnknownSSHHost(hostname string, key ssh.PublicKey) (bool, error) {
+	if shouldAutoAcceptUnknownSSHHosts() {
+		return true, nil
+	}
+	return sshHostKeyPrompter(hostname, key)
+}
+
+func shouldAutoAcceptUnknownSSHHosts() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KUBEVM_SSH_ACCEPT_NEW_HOSTS"))) {
+	case "1", "true", "yes", "y":
+		return true
+	default:
+		return false
+	}
+}
+
+func promptSSHHostKey(hostname string, key ssh.PublicKey) (bool, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false, fmt.Errorf("ssh host %s is unknown; set KUBEVM_SSH_ACCEPT_NEW_HOSTS=1 or run from a terminal to confirm the host key", displaySSHHost(hostname))
+	}
+	defer tty.Close()
+
+	if _, err := fmt.Fprintf(tty, "The authenticity of host '%s' can't be established.\nKey fingerprint is %s.\nTrust this host and add it to known_hosts? (yes/no): ", displaySSHHost(hostname), ssh.FingerprintSHA256(key)); err != nil {
+		return false, fmt.Errorf("prompt SSH host key: %w", err)
+	}
+	answer, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil {
+		return false, fmt.Errorf("read SSH host key confirmation: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "yes", "y":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create known_hosts directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open known_hosts: %w", err)
+	}
+	defer file.Close()
+
+	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+	if !strings.HasSuffix(line, "\n") {
+		line += "\n"
+	}
+	if _, err := io.WriteString(file, line); err != nil {
+		return fmt.Errorf("write known_hosts entry: %w", err)
+	}
+	return nil
+}
+
+func displaySSHHost(hostname string) string {
+	host, port, err := net.SplitHostPort(hostname)
+	if err != nil {
+		return hostname
+	}
+	if port == "22" {
+		return host
+	}
+	return hostname
+}
+
+func forwardSSHWindowChanges(session *ssh.Session, fd int) func() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-sigCh:
+				width, height, err := term.GetSize(fd)
+				if err != nil {
+					continue
+				}
+				_ = session.WindowChange(height, width)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		signal.Stop(sigCh)
+	}
+}
+
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	if strings.IndexFunc(arg, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("@%_+=:,./-", r))
+	}) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `"'"'"`) + "'"
+}
+
 func attachConsole(socketPath, uid string) error {
 	if uid == "" {
 		return fmt.Errorf("uid is required to attach to a VM")
 	}
-	if _, err := control.Dial(socketPath, "connect", map[string]any{"uid": uid}); err != nil {
+	if _, err := controlDial(socketPath, "connect", map[string]any{"uid": uid}); err != nil {
 		return err
 	}
 

@@ -9,8 +9,9 @@ require (
 
 require (
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/sys v0.16.0
-	golang.org/x/term v0.16.0
+	golang.org/x/crypto v0.23.0
+	golang.org/x/sys v0.20.0
+	golang.org/x/term v0.20.0
 )
 
 require (

@@ -127,6 +127,24 @@ Examples:
 # Attach later
 ./kube-vmctl connect -uid abc123
 
+# SSH to a NATed guest by VM UID
+./kube-vmctl ssh abc123
+
+# Run a remote command against a guest
+./kube-vmctl ssh 10.0.2.15 -- uname -a
+
+# Pipe a local script into the guest shell
+./kube-vmctl ssh abc123 -- sh -s < setup.sh
+
+# Supply a password non-interactively for a script-driven SSH command
+KUBEVM_SSH_PASSWORD=secret ./kube-vmctl ssh -l root abc123 -- sh -s < setup.sh
+
+# Auto-accept a first-seen host key for non-interactive runs
+KUBEVM_SSH_ACCEPT_NEW_HOSTS=1 KUBEVM_SSH_PASSWORD=secret ./kube-vmctl ssh -l root abc123 -- sh -s < setup.sh
+
+# Disable SSH host key verification entirely
+KUBEVM_SSH_IGNORE_HOST_KEY=1 KUBEVM_SSH_PASSWORD=secret ./kube-vmctl ssh -l root abc123
+
 # Stop VM
 ./kube-vmctl shutdown -uid abc123
 ```
@@ -151,6 +169,16 @@ Start-time flags accepted by `kube-vmctl`:
 Environment:
 
 - `KUBEVM_SOCKET`: default socket path for `kube-vmctl`
+
+SSH:
+
+- `kube-vmctl ssh <uid-or-ip>` resolves a VM UID via `examine` and uses the guest NAT IP
+- use `-l/--user` to select the SSH username and `-p/--port` to override port `22`
+- use `--insecure-ignore-host-key` or `KUBEVM_SSH_IGNORE_HOST_KEY=1` to skip SSH host key verification entirely
+- if no remote command is provided, `kube-vmctl ssh` opens an interactive shell with a PTY when run from a terminal
+- pass a remote command after `--` to run commands or pipe a script over standard input
+- SSH auth tries agent and local keys first, then falls back to `KUBEVM_SSH_PASSWORD` or an interactive `/dev/tty` password prompt
+- unknown host keys are confirmed on first connect and written to `~/.ssh/known_hosts`; set `KUBEVM_SSH_ACCEPT_NEW_HOSTS=1` for non-interactive acceptance
 
 ## VM IDs and Console Sockets
 
