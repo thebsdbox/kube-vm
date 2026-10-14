@@ -163,17 +163,27 @@ func authorized(r *http.Request, token string) bool {
 	if token == "" {
 		return true
 	}
-	if strings.TrimSpace(r.Header.Get("X-Auth-Token")) == token {
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return true
 	}
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		if strings.TrimSpace(auth[7:]) == token {
+
+	for _, candidate := range []string{
+		strings.TrimSpace(r.Header.Get("X-Auth-Token")),
+		strings.TrimSpace(r.Header.Get("Authorization")),
+		strings.TrimSpace(r.URL.Query().Get("token")),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if candidate == token {
 			return true
 		}
-	}
-	if strings.TrimSpace(r.URL.Query().Get("token")) == token {
-		return true
+		if strings.HasPrefix(strings.ToLower(candidate), "bearer ") {
+			if strings.TrimSpace(candidate[7:]) == token {
+				return true
+			}
+		}
 	}
 	return false
 }

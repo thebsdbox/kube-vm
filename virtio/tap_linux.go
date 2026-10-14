@@ -5,6 +5,10 @@ package virtio
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -19,6 +23,10 @@ type TapDevice struct {
 // OpenTAP creates or opens a TAP device and returns it with its final name.
 // If name is empty, the kernel assigns a name (for example, tap0).
 func OpenTAP(name string) (*TapDevice, string, error) {
+	if _, err := exec.LookPath("ip"); err == nil {
+		_ = cleanupStaleTAPs()
+	}
+
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, "", fmt.Errorf("open /dev/net/tun: %w", err)
@@ -41,6 +49,87 @@ func OpenTAP(name string) (*TapDevice, string, error) {
 	return &TapDevice{File: os.NewFile(uintptr(fd), finalName), name: finalName}, finalName, nil
 }
 
+func cleanupStaleTAPs() error {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "tap") || len(name) <= 3 {
+			continue
+		}
+
+		state, err := os.ReadFile(filepath.Join("/sys/class/net", name, "operstate"))
+		if err != nil {
+			continue
+		}
+		stateStr := strings.TrimSpace(string(state))
+		if stateStr == "down" || stateStr == "unknown" {
+			if err := exec.Command("ip", "link", "del", "dev", name).Run(); err != nil {
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func staleTapNames(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+
+	var stale []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "tap") || len(name) <= 3 {
+			continue
+		}
+
+		state, err := os.ReadFile(filepath.Join(root, name, "operstate"))
+		if err != nil {
+			continue
+		}
+		stateStr := strings.TrimSpace(string(state))
+		if stateStr == "down" || stateStr == "unknown" {
+			stale = append(stale, name)
+		}
+	}
+	return stale, nil
+}
+
+func RemoveTAP(name string) error {
+	if name == "" {
+		return nil
+	}
+
+	if _, err := exec.LookPath("ip"); err == nil {
+		_ = exec.Command("ip", "link", "set", "dev", name, "down").Run()
+		for i := 0; i < 10; i++ {
+			if err := exec.Command("ip", "link", "del", "dev", name).Run(); err == nil {
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join("/sys/class/net", name)); err != nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("tap %s still exists after cleanup", name)
+}
+
 func (t *TapDevice) Close() error {
 	if t == nil || t.File == nil {
 		return nil
@@ -52,6 +141,10 @@ func (t *TapDevice) Close() error {
 				_ = t.File.Close()
 				return err
 			}
+		}
+		if err := RemoveTAP(t.name); err != nil {
+			_ = t.File.Close()
+			return err
 		}
 	}
 

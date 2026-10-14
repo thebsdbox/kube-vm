@@ -87,22 +87,27 @@ func Serve(ctx context.Context, addr string, svc Service, token string) error {
 
 	mux.HandleFunc("/api/v1/vms/start", api(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			fmt.Fprintf(os.Stderr, "kube-vm: webui: /api/v1/vms/start rejected method=%s from %s\n", r.Method, r.RemoteAddr)
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
 		uid, payload, err := parseStartRequest(r)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "kube-vm: webui: start parse failed remote=%s auth=%q content-type=%q err=%v\n", r.RemoteAddr, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), err)
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		if len(payload) == 0 && svc.DefaultStartPayload != nil {
 			payload = svc.DefaultStartPayload()
 		}
+		fmt.Fprintf(os.Stderr, "kube-vm: webui: start request remote=%s uid=%q payload=%#v\n", r.RemoteAddr, uid, payload)
 		started, err := svc.Start(uid, payload)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "kube-vm: webui: start rejected remote=%s uid=%q payload=%#v err=%v\n", r.RemoteAddr, uid, payload, err)
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		fmt.Fprintf(os.Stderr, "kube-vm: webui: start accepted remote=%s uid=%q started=%q\n", r.RemoteAddr, uid, started)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": started})
 	}))
 

@@ -15,6 +15,7 @@ import (
 
 	"kube-vm/control"
 	"kube-vm/hoststats"
+	"kube-vm/virtio"
 	"kube-vm/vmconfig"
 	"kube-vm/vmm"
 	"kube-vm/vmnet"
@@ -261,10 +262,12 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	logVM(uid, "start", "request payload keys=%v", sortedPayloadKeys(payload))
 
 	s.mu.Lock()
 	if _, ok := s.vms[uid]; ok {
 		s.mu.Unlock()
+		logVM(uid, "start", "rejected: uid already exists")
 		return "", fmt.Errorf("vm: uid %s already exists", uid)
 	}
 	if s.vms == nil {
@@ -491,6 +494,15 @@ func (s *vmServer) Shutdown(uid string) error {
 	return err
 }
 
+func sortedPayloadKeys(payload map[string]any) []string {
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func generateUID() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 6)
@@ -699,6 +711,15 @@ func (c *vmController) Shutdown() error {
 		err = safeCloseVM(vm)
 		if errors.Is(err, vmm.ErrVMClosed) {
 			err = nil
+		}
+	}
+	if c.tap != "" {
+		if tapErr := virtio.RemoveTAP(c.tap); tapErr != nil {
+			if err == nil {
+				err = tapErr
+			} else {
+				logVM(c.uid, "shutdown", "tap cleanup error: %v", tapErr)
+			}
 		}
 	}
 

@@ -648,7 +648,9 @@ const frontendHTML = `<!doctype html>
       opts = opts || {};
       opts.headers = opts.headers || {};
       if (token() !== '') {
-        opts.headers['Authorization'] = 'Bearer ' + token();
+        const value = token();
+        opts.headers['Authorization'] = 'Bearer ' + value;
+        opts.headers['X-Auth-Token'] = value;
       }
       const res = await fetch(path, opts);
       const body = await res.json();
@@ -1346,7 +1348,8 @@ const frontendHTML = `<!doctype html>
     startFormEl.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       statusEl.textContent = 'starting vm...';
-      const fd = new FormData(ev.target);
+      try {
+        const fd = new FormData(ev.target);
 			const runConfig = collectFormConfig();
 			if (natModeEl && natModeEl.checked) {
 				const fixedCmdline = ensureDHCPInCmdline(fd.get('cmdline'), true);
@@ -1356,11 +1359,11 @@ const frontendHTML = `<!doctype html>
 					cmdlineInputEl.value = fixedCmdline;
 				}
 			}
-      const payload = new URLSearchParams();
-      for (const pair of fd.entries()) {
-        if (String(pair[1]).trim() !== '') payload.append(pair[0], pair[1]);
-      }
-      const body = await api('/api/v1/vms/start', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: payload.toString() });
+        const payload = new URLSearchParams();
+        for (const pair of fd.entries()) {
+          if (String(pair[1]).trim() !== '') payload.append(pair[0], pair[1]);
+        }
+        const body = await api('/api/v1/vms/start', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: payload.toString() });
 			statusEl.textContent = 'started ' + body.uid;
 			if (startConnectEl && startConnectEl.checked && body.uid) {
 				try {
@@ -1382,6 +1385,16 @@ const frontendHTML = `<!doctype html>
 					}
 				}
 			}
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        statusEl.textContent = 'start failed: ' + msg;
+        if (configStatusEl) {
+          configStatusEl.textContent = 'start failed: ' + msg;
+        }
+        if (consoleStatus) {
+          consoleStatus.textContent = 'start failed: ' + msg;
+        }
+      }
     });
 
     document.getElementById('refresh').addEventListener('click', () => refresh().catch(err => statusEl.textContent = err.message));

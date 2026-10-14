@@ -50,3 +50,17 @@ func TestParseStartRequestFormBuildsCOWBlockSpec(t *testing.T) {
 		t.Fatalf("blocks[1] = %q, want %q", blocks[1], want)
 	}
 }
+
+func TestAuthorizedAcceptsBearerAndHeaderToken(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/v1/vms/start", strings.NewReader("uid=testvm"))
+	req.Header.Set("Authorization", "Bearer secret-token")
+	if !authorized(req, "secret-token") {
+		t.Fatalf("authorized with bearer token returned false")
+	}
+
+	req2 := httptest.NewRequest("POST", "/api/v1/vms/start", strings.NewReader("uid=testvm"))
+	req2.Header.Set("X-Auth-Token", "  secret-token  ")
+	if !authorized(req2, "secret-token") {
+		t.Fatalf("authorized with raw token header returned false")
+	}
+}
