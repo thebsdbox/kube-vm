@@ -4,6 +4,7 @@ package virtq
 
 import (
 	"errors"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -19,9 +20,10 @@ type Queue struct {
 	drvE *EventSuppress
 	devE *EventSuppress
 
-	aidx uint16
-	uidx uint16
-	wrap bool
+	aidx      uint16
+	uidx      uint16
+	availWrap bool
+	usedWrap  bool
 }
 
 // Chain is a descriptor chain in a packed virtqueue.
@@ -63,7 +65,7 @@ const (
 
 // New returns a new virtqueue backed by the given ring and event suppression areas.
 func New(ring []Desc, drvE, devE *EventSuppress, cfg Config) *Queue {
-	return &Queue{cfg: cfg, ring: ring, drvE: drvE, devE: devE, wrap: true}
+	return &Queue{cfg: cfg, ring: ring, drvE: drvE, devE: devE, availWrap: true, usedWrap: true}
 }
 
 // Next returns the next available descriptor chain, or nil if no descriptors
@@ -81,31 +83,34 @@ func (q *Queue) Next() (avail *Chain, err error) {
 		return
 	}
 
-	head := i
-
 	c := &Chain{
 		q:    q,
-		id:   q.ring[head].ID,
+		id:   q.ring[i].ID,
 		skip: 1,
-		Desc: q.ring[head : head+1],
+		Desc: []Desc{q.ring[i]},
 	}
 
 	switch {
 	case q.ring[i].Continues():
 		for {
+			if int(c.skip) == len(q.ring) {
+				return nil, errors.New("descriptor chain exceeds ring size")
+			}
 			i, ok = q.advance()
 
 			if !ok {
 				return nil, errors.New("descriptor continues but no next descriptor is available")
 			}
+			c.Desc = append(c.Desc, q.ring[i])
+			c.skip++
 
 			if !q.ring[i].Continues() {
 				break
 			}
 		}
 
-		c.skip = i - head + 1
-		c.Desc = q.ring[head : i+1]
+		// For a direct packed chain, the buffer ID is in its last descriptor.
+		c.id = q.ring[i].ID
 
 	case q.ring[i].IsIndirect():
 		data, err := q.getBuf(q.ring[i])
@@ -113,7 +118,7 @@ func (q *Queue) Next() (avail *Chain, err error) {
 			return nil, err
 		}
 
-		if len(data)%16 != 0 {
+		if len(data) == 0 || len(data)%16 != 0 {
 			return nil, errors.New("malformed indirect buffer")
 		}
 
@@ -141,9 +146,12 @@ func (q *Queue) getBuf(d Desc) (buf []byte, err error) {
 }
 
 func (q *Queue) advance() (index uint16, ok bool) {
-	a := q.ring[q.aidx].Flags&DescFAvail != 0
-	u := q.ring[q.aidx].Flags&DescFUsed != 0
-	if a == u || a != q.wrap {
+	// ID and flags form an aligned 32-bit word in a packed descriptor.
+	// Load ownership before consuming descriptor fields written by the guest.
+	flags := uint16(atomic.LoadUint32((*uint32)(unsafe.Pointer(&q.ring[q.aidx].ID))) >> 16)
+	a := flags&DescFAvail != 0
+	u := flags&DescFUsed != 0
+	if a == u || a != q.availWrap {
 		return
 	}
 
@@ -153,6 +161,7 @@ func (q *Queue) advance() (index uint16, ok bool) {
 	q.aidx++
 	if q.aidx == uint16(len(q.ring)) {
 		q.aidx = 0
+		q.availWrap = !q.availWrap
 	}
 
 	return
@@ -162,13 +171,13 @@ func (q *Queue) release(c *Chain, bytesWritten int) error {
 	d := &q.ring[q.uidx]
 	a := d.Flags&DescFAvail != 0
 	u := d.Flags&DescFUsed != 0
-	if a == u || a != q.wrap {
+	if a == u || a != q.usedWrap {
 		panic("ring full")
 	}
 
 	var flags uint16
 
-	if q.wrap {
+	if q.usedWrap {
 		flags |= 1<<7 | 1<<15
 	}
 
@@ -176,23 +185,35 @@ func (q *Queue) release(c *Chain, bytesWritten int) error {
 		flags |= DescFWrite
 	}
 
-	*d = Desc{
-		ID:    c.id,
-		Len:   uint32(bytesWritten),
-		Flags: flags,
-	}
+	// Publish ownership last, after the payload, status and used length.
+	// A whole-struct assignment may expose used flags before the other fields.
+	d.Len = uint32(bytesWritten)
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(&d.ID)), uint32(c.id)|uint32(flags)<<16)
 
 	uidx := q.uidx
-	wrap := q.wrap
+	wrap := q.usedWrap
 
 	q.uidx += c.skip
 	if q.uidx >= uint16(len(q.ring)) {
 		q.uidx -= uint16(len(q.ring))
-		q.wrap = !q.wrap
+		q.usedWrap = !q.usedWrap
 	}
 
-	if q.drvE.ShouldNotify(uidx, wrap) {
-		return q.cfg.Notify()
+	if q.drvE != nil && q.cfg.Notify != nil {
+		// A chain may pass the driver's requested event offset, including across
+		// the ring boundary. Checking only its head can miss the wakeup.
+		event := atomic.LoadUint32((*uint32)(unsafe.Pointer(q.drvE)))
+		e := EventSuppress{Desc: uint16(event), Flags: uint16(event >> 16)}
+		for n := uint16(0); n < c.skip; n++ {
+			if e.ShouldNotify(uidx, wrap) {
+				return q.cfg.Notify()
+			}
+			uidx++
+			if uidx == uint16(len(q.ring)) {
+				uidx = 0
+				wrap = !wrap
+			}
+		}
 	}
 
 	return nil

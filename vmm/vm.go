@@ -370,7 +370,7 @@ func New(cfg Config) (*VM, error) {
 
 		Notify: func(irq int) error {
 			if fd, ok := m.irqf[irq]; ok {
-				if _, err := unix.Write(fd, []byte{0, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+				if _, err := unix.Write(fd, []byte{1, 0, 0, 0, 0, 0, 0, 0}); err != nil {
 					return err
 				}
 			}

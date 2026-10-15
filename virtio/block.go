@@ -23,6 +23,9 @@ type BlockDevice struct {
 	// Storage is the backing storage for the device. Storage may also
 	// implement the io.WriterAt interface to enable writes.
 	Storage BlockStorage
+
+	// Metrics optionally collects guest request statistics.
+	Metrics *BlockMetrics
 }
 
 // BlockStorage is the basic interface to a block device's backing storage. It is
@@ -227,95 +230,125 @@ func (h *blockHandler) handle(q *virtq.Queue) error {
 			return nil
 		}
 
-		if len(c.Desc) != 3 {
-			panic("invalid descriptor chain length")
+		if err := h.handleRequest(c); err != nil {
+			return err
 		}
+	}
+}
 
-		hd := c.Desc[0]
-		dd := c.Desc[1]
-		sd := c.Desc[2]
-
-		if !hd.IsRO() {
-			panic("descriptor 0 (hdr) is not read-only")
-		}
-
-		if !sd.IsWO() {
-			panic("descriptor 2 (status) is not write-only")
-		}
-
+func (h *blockHandler) handleRequest(c *virtq.Chain) error {
+	if len(c.Desc) < 2 {
+		return fmt.Errorf("block request needs header and status descriptors")
+	}
+	last := len(c.Desc) - 1
+	if !c.Desc[last].IsWO() {
+		return fmt.Errorf("block status descriptor is not write-only")
+	}
+	status, err := c.Buf(last)
+	if err != nil {
+		return err
+	}
+	if len(status) != 1 {
+		return fmt.Errorf("invalid block status buffer length %d", len(status))
+	}
+	status[0] = blkSOK
+	usedLen := 1
+	var readBytes, writeBytes uint64
+	op := ^uint32(0)
+	if hdr, err := c.Buf(0); err == nil && len(hdr) == 16 {
+		op = binary.LittleEndian.Uint32(hdr)
+	}
+	started := h.cfg.Metrics.begin(op)
+	failed := false
+	defer func() {
+		h.cfg.Metrics.finish(started, readBytes, writeBytes, failed)
+	}()
+	// Even a malformed request with a usable status byte must be completed,
+	// otherwise the guest can wait forever for a consumed descriptor.
+	opErr := func() error {
 		hdr, err := c.Buf(0)
 		if err != nil {
 			return err
 		}
-
-		if len(hdr) != 16 {
-			panic("invalid hdr buffer length")
+		if !c.Desc[0].IsRO() || len(hdr) != 16 {
+			return fmt.Errorf("invalid block request header")
 		}
-
-		data, err := c.Buf(1)
-		if err != nil {
-			return err
-		}
-
-		status, err := c.Buf(2)
-		if err != nil {
-			return err
-		}
-
-		if len(status) != 1 {
-			panic("invalid status buffer length")
-		}
-
-		var (
-			optype = binary.LittleEndian.Uint32(hdr)
-			offsec = binary.LittleEndian.Uint64(hdr[8:])
-		)
-
-		status[0] = blkSOK
-		usedLen := 1
-		var n int
-		switch optype {
-		case blkTIn:
-			if !dd.IsWO() {
-				panic("descriptor 1 (data) is not write-only")
-			}
-
-			n, err = h.cfg.Storage.ReadAt(data, int64(offsec)*512)
-			usedLen += n
-
-		case blkTOut:
-			if h.w == nil {
-				status[0] = blkSUnsupp
-				break
-			}
-
-			if !dd.IsRO() {
-				panic("descriptor 1 (data) is not read-only")
-			}
-
-			n, err = h.w.WriteAt(data, int64(offsec)*512)
-
+		op := binary.LittleEndian.Uint32(hdr)
+		sector := binary.LittleEndian.Uint64(hdr[8:])
+		switch op {
 		case blkTFlush:
 			if h.w == nil || h.s == nil {
 				status[0] = blkSUnsupp
-				break
+				return nil
 			}
-
-			err = h.s.Sync()
-
+			return h.s.Sync()
+		case blkTIn, blkTOut:
+			if op == blkTOut && h.w == nil {
+				status[0] = blkSUnsupp
+				return nil
+			}
 		default:
 			status[0] = blkSUnsupp
+			return nil
 		}
-
+		if sector > uint64((1<<63-1)/512) {
+			return fmt.Errorf("block sector offset overflow: %d", sector)
+		}
+		offset := int64(sector * 512)
+		// Validate the whole transfer before writing any of its segments.
+		size, err := h.cfg.Storage.Size()
 		if err != nil {
-			status[0] = blkSIOErr
-			slog.Error("block io error", "err", err)
-		}
-
-		if err := c.Release(usedLen); err != nil {
 			return err
 		}
+		end := offset
+		for i := 1; i < last; i++ {
+			if c.Desc[i].IsWO() != (op == blkTIn) {
+				return fmt.Errorf("invalid block data descriptor direction")
+			}
+			if end > size || int64(c.Desc[i].Len) > size-end {
+				return fmt.Errorf("block request exceeds capacity")
+			}
+			end += int64(c.Desc[i].Len)
+		}
+		for i := 1; i < last; i++ {
+			data, err := c.Buf(i)
+			if err != nil {
+				return err
+			}
+			var n int
+			if op == blkTIn {
+				n, err = h.cfg.Storage.ReadAt(data, offset)
+				usedLen += n
+				if n > 0 {
+					readBytes += uint64(n)
+				}
+				if err == nil && n != len(data) {
+					err = io.ErrUnexpectedEOF
+				}
+			} else {
+				n, err = h.w.WriteAt(data, offset)
+				if n > 0 {
+					writeBytes += uint64(n)
+				}
+				if err == nil && n != len(data) {
+					err = io.ErrShortWrite
+				}
+			}
+			if err != nil {
+				return err
+			}
+			offset += int64(n)
+		}
+		return nil
+	}()
+	if opErr != nil {
+		status[0] = blkSIOErr
+		slog.Error("block io error", "err", opErr)
 	}
+	// Do not read guest status after publishing completion: the guest may
+	// immediately reuse that memory for another request.
+	failed = status[0] != blkSOK
+	return c.Release(usedLen)
 }
 
 func (h *blockHandler) ReadConfig(p []byte, off int) error {
@@ -359,7 +392,13 @@ func (h *blockHandler) getBlkConfig() (*blkConfig, error) {
 
 // ReadAt copies from the backing slice at off into p.
 func (ms *MemStorage) ReadAt(p []byte, off int64) (n int, err error) {
-	return copy(p, ms.Bytes[off:]), nil
+	if off < 0 {
+		return 0, fmt.Errorf("mem storage read negative offset %d", off)
+	}
+	if off > int64(len(ms.Bytes)) || off+int64(len(p)) > int64(len(ms.Bytes)) {
+		return 0, io.EOF
+	}
+	return copy(p, ms.Bytes[off:off+int64(len(p))]), nil
 }
 
 // Size returns the size of the backing slice in bytes.
@@ -369,11 +408,27 @@ func (ms *MemStorage) Size() (int64, error) {
 
 // WriteAt copies p into the backing slice at off.
 func (ms *MemStorage) WriteAt(p []byte, off int64) (n int, err error) {
-	return copy(ms.Bytes[off:], p), nil
+	if off < 0 {
+		return 0, fmt.Errorf("mem storage write negative offset %d", off)
+	}
+	if off > int64(len(ms.Bytes)) || off+int64(len(p)) > int64(len(ms.Bytes)) {
+		return 0, io.ErrShortWrite
+	}
+	return copy(ms.Bytes[off:off+int64(len(p))], p), nil
 }
 
 // ReadAt reads from the backing file.
 func (fs *FileStorage) ReadAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("file storage read negative offset %d", off)
+	}
+	sz, err := fs.Size()
+	if err != nil {
+		return 0, err
+	}
+	if off > sz || off+int64(len(p)) > sz {
+		return 0, io.EOF
+	}
 	return fs.File.ReadAt(p, off)
 }
 
@@ -389,6 +444,16 @@ func (fs *FileStorage) Size() (int64, error) {
 
 // WriteAt writes to the backing file.
 func (fs *FileStorage) WriteAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("file storage write negative offset %d", off)
+	}
+	sz, err := fs.Size()
+	if err != nil {
+		return 0, err
+	}
+	if off > sz || off+int64(len(p)) > sz {
+		return 0, io.ErrShortWrite
+	}
 	return fs.File.WriteAt(p, off)
 }
 

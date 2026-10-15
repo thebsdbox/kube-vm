@@ -197,6 +197,47 @@ Example with default socket:
 
 ## Storage and Boot Options
 
+### Storage statistics
+
+`GET /api/v1/vms` includes a `storage` array for each VM with block devices.
+The same array is included in control API VM details (`examine`). Entries follow
+device attachment order, including ISO devices, and contain:
+
+- `spec`, `capacity_bytes`, `read_only`: backing specification and device capacity.
+- `read_ops`, `write_ops`, `flush_ops`: attempted guest requests, counted once per
+  request rather than once per scatter/gather segment.
+- `read_bytes`, `write_bytes`: actual transferred bytes, including partial I/O.
+- `errors`: failed or unsupported requests with a valid request/status layout.
+- `in_flight`: requests currently being processed, useful when I/O stalls.
+- `completed_ops`: processed requests, including failures.
+- `io_time_ns`, `max_io_time_ns`: total and maximum completed-request processing
+  time in nanoseconds, including flush and completion notification time.
+
+Counters reset when a new device is created and are sampled without storage
+locks, so snapshots can be slightly inconsistent while requests complete.
+They describe guest-visible block I/O, not filesystem used/free space or physical
+host I/O (for example, COW write amplification is not included).
+
+The web dashboard's **Storage** column shows per-disk totals, capacity, read-only
+status, errors, pending I/O, and average/maximum latency. Throughput and IOPS are
+calculated between dashboard refreshes; the first sample has no rate yet.
+
+The **Show History / Hide History** button in the **Server Statistics** header
+toggles a historical graph without hiding the current statistics cards. The
+button changes color and remembers its visibility setting in browser local
+storage when available.
+
+- Choose server/all VMs, an individual VM, or an individual disk as the source.
+- Plot storage read/write throughput, IOPS, interval-average latency, pending
+  requests, errors per second, VM host CPU, or memory. CPU and memory are not
+  applicable to individual disks; server memory means daemon heap, while VM
+  memory means assigned memory, not guest filesystem usage.
+- Select a 5-minute, 15-minute, or one-hour window. Up to 720 samples from the
+  last hour are retained in the open tab, including while the graph is hidden.
+- History starts when the page opens and is cleared on reload; it is not a
+  persistent server-side metrics archive. Missing samples and counter resets
+  create gaps rather than negative rates or restart spikes.
+
 ### Block device specs
 
 Block specs currently support:
@@ -212,6 +253,25 @@ Copy-on-write block specs are also supported through the canonical `cow:` form:
 - `cow:/path/base.img?overlay=/path/vm.overlay`
 
 This keeps the base image unchanged and redirects guest writes into the overlay file.
+
+#### Recovering after guest I/O or filesystem errors
+
+- Stop write-heavy workloads if the guest reports ext4 checksum errors. Do not
+  keep stress-testing a filesystem that may already be damaged.
+- Shut down the VM and make a backup before attempting filesystem repair. Never
+  run a filesystem repair tool against an image that is attached to a running VM
+  or mounted on the host.
+- For a raw ext4 image, check and repair an offline copy with an ext4 filesystem
+  checker. Partitioned images require checking the appropriate partition, not
+  the entire disk image.
+- A kube-vm COW overlay is a container, not a raw ext4 image. Do not run an ext4
+  checker directly on the overlay. Preserve both the base and overlay for recovery;
+  for a disposable VM, test with a known-good base and a new overlay instead.
+- Rebuild kube-vm and restart the VM after block-device code changes. Existing
+  processes do not pick up source changes, and fixes do not repair prior damage.
+- Retest on a disposable, known-good image. Preserve guest kernel errors and host
+  kube-vm logs if I/O still stalls; filesystem damage alone does not prove that
+  the host storage device is failing.
 
 Examples:
 

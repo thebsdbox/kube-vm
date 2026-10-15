@@ -7,6 +7,7 @@ DOCKER_TAG ?=
 DOCKERFILE ?= 
 DISK_DIR ?= disks
 DISK_IMG ?= kube-vm-disk.img
+DISK_SIZE ?= 2500M
 MOUNT_DIR ?= /mnt
 
 .PHONY: all build build-vm build-client clean demo exit-demo build-disk
@@ -45,7 +46,7 @@ build-disk:
 	@set -eu; \
 	uuid="$$(cat /proc/sys/kernel/random/uuid | cut -c1-8)"; \
 	docker create --name="$$uuid" "$(DOCKER_TAG)" >/dev/null; \
-	sudo dd if=/dev/zero of="$(DISK_DIR)/$(DISK_IMG)" bs=1 count=0 seek=2500M; \
+	sudo dd if=/dev/zero of="$(DISK_DIR)/$(DISK_IMG)" bs=1 count=0 seek=$(DISK_SIZE); \
 	sudo mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0 "$(DISK_DIR)/$(DISK_IMG)"; \
 	sudo mount -o loop "$(DISK_DIR)/$(DISK_IMG)" "$(MOUNT_DIR)"; \
 	docker export "$$uuid" | sudo tar x -C "$(MOUNT_DIR)"; \

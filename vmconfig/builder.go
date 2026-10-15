@@ -310,7 +310,17 @@ func blockDeviceFromSpec(spec string, readOnly bool) (*virtio.BlockDevice, error
 		return nil, fmt.Errorf("kube-vm: unsupported block storage scheme %q", u.Scheme)
 	}
 
-	return &virtio.BlockDevice{Storage: stg, ReadOnly: ro}, nil
+	size, err := stg.Size()
+	if err != nil {
+		return nil, fmt.Errorf("kube-vm: block capacity %q: %w", spec, err)
+	}
+	if size < 0 {
+		return nil, fmt.Errorf("kube-vm: negative block capacity for %q", spec)
+	}
+	return &virtio.BlockDevice{
+		Storage: stg, ReadOnly: ro,
+		Metrics: virtio.NewBlockMetrics(spec, uint64(size), ro),
+	}, nil
 }
 
 func localBlockPath(u *url.URL) string {

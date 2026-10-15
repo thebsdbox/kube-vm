@@ -2,6 +2,7 @@ package kubevm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -11,8 +12,44 @@ import (
 	"time"
 
 	"kube-vm/control"
+	"kube-vm/virtio"
 	"kube-vm/vmm"
 )
+
+func TestVMStorageStatsSnapshotAndDetails(t *testing.T) {
+	c := &vmController{uid: "diskvm", storage: []*virtio.BlockMetrics{
+		virtio.NewBlockMetrics("cow:/base?overlay=/vm", 8192, false),
+		nil,
+		virtio.NewBlockMetrics("installer.iso", 4096, true),
+	}}
+	snapshot := c.snapshot(time.Now())
+	if len(snapshot.Storage) != 2 || snapshot.Storage[1].Spec != "installer.iso" || !snapshot.Storage[1].ReadOnly {
+		t.Fatalf("storage snapshot: %+v", snapshot.Storage)
+	}
+	details := vmDetailsFromSnapshot(snapshot)
+	if len(details.Storage) != 2 || details.Storage[0].CapacityBytes != 8192 {
+		t.Fatalf("storage details: %+v", details.Storage)
+	}
+	for _, payload := range []any{snapshot, details} {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct { Storage []map[string]any `json:"storage"` }
+		if err := json.Unmarshal(encoded, &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"spec", "capacity_bytes", "read_only", "read_ops", "write_ops", "flush_ops", "read_bytes", "write_bytes", "errors", "in_flight", "completed_ops", "io_time_ns", "max_io_time_ns"} {
+			if _, ok := body.Storage[0][field]; !ok {
+				t.Errorf("API missing %q in %s", field, encoded)
+			}
+		}
+	}
+	details.Storage[0].Spec = "changed"
+	if snapshot.Storage[0].Spec == "changed" {
+		t.Fatal("details aliases snapshot storage")
+	}
+}
 
 func TestVMServerShutdownRemovesStaleEntry(t *testing.T) {
 	s := &vmServer{vms: map[string]*vmController{"abc123": nil}}

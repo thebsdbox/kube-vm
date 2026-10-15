@@ -61,6 +61,17 @@ const frontendHTML = `<!doctype html>
     .panel h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 1rem; }
 	.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 	.panel-head h2 { padding: 0; border-bottom: 0; }
+	.panel-head { flex-wrap: wrap; }
+	.stats-history { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+	.stats-history[hidden] { display: none; }
+	.history-controls { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+	.history-chart { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); overflow: hidden; }
+	.history-chart svg { display: block; width: 100%; height: auto; min-height: 180px; }
+	.history-chart text { fill: var(--muted); font: 12px "IBM Plex Mono", monospace; }
+	.history-chart .chart-grid { stroke: var(--line); stroke-width: 1; }
+	.history-chart .chart-series { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+	.history-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; font-size: 0.85rem; }
+	.history-key::before { content: ''; display: inline-block; width: 18px; height: 3px; margin-right: 7px; vertical-align: middle; background: var(--series-color); }
     .content { padding: 14px; }
     .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
     .compact-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
@@ -116,9 +127,33 @@ const frontendHTML = `<!doctype html>
     <section class="panel"><h2>API auth token</h2><div class="content"><label>Bearer token (optional)</label><input id="token" placeholder="matches -web-token" /><div class="status">Stored in your browser local storage for this page origin.</div></div></section>
 
 		<section class="panel">
-			<h2>Server Statistics</h2>
+			<div class="panel-head">
+				<h2>Server Statistics</h2>
+				<button id="stats-history-toggle" class="toggle-off" type="button" aria-controls="stats-history" aria-expanded="false">Show History</button>
+			</div>
 			<div class="content">
 				<section class="cards" id="cards"></section>
+				<div class="stats-history" id="stats-history" hidden>
+					<div class="history-controls">
+						<div><label for="stats-history-source">Source</label><select id="stats-history-source"><option value="all">Server / all VMs</option></select></div>
+						<div><label for="stats-history-metric">Metric</label><select id="stats-history-metric">
+							<option value="throughput">Storage throughput</option>
+							<option value="iops">Storage IOPS</option>
+							<option value="latency">Storage average latency</option>
+							<option value="pending">Storage pending requests</option>
+							<option value="errors">Storage errors / second</option>
+							<option value="cpu">VM host CPU</option>
+							<option value="memory">Memory</option>
+						</select></div>
+						<div><label for="stats-history-window">Time window</label><select id="stats-history-window">
+							<option value="5">Last 5 minutes</option><option value="15" selected>Last 15 minutes</option><option value="60">Last hour</option>
+						</select></div>
+					</div>
+					<div class="history-chart" id="stats-history-chart"></div>
+					<div class="history-legend" id="stats-history-legend"></div>
+					<div class="status" id="stats-history-summary"></div>
+					<div class="status">Samples are collected every 5 seconds while this page is open, even when hidden. Up to one hour is kept in this tab; reloading clears history. Memory shows daemon heap or VM assigned memory.</div>
+				</div>
 			</div>
 		</section>
 
@@ -207,9 +242,9 @@ const frontendHTML = `<!doctype html>
 
     <section class="panel">
       <h2>Virtual Machines</h2>
-      <div class="content">
+			<div class="content" style="overflow:auto;">
 				<table>
-					<thead><tr><th>UID</th><th>State</th><th>Uptime</th><th>Mem</th><th>CPU</th><th>Host CPU</th><th>Host Mem</th><th>Boot</th><th>Network</th><th>NIC Stats</th><th>Action</th></tr></thead>
+					<thead><tr><th>UID</th><th>State</th><th>Uptime</th><th>Mem</th><th>CPU</th><th>Host CPU</th><th>Host Mem</th><th>Boot</th><th>Network</th><th>NIC Stats</th><th>Storage</th><th>Action</th></tr></thead>
           <tbody id="vm-rows"></tbody>
         </table>
       </div>
@@ -842,6 +877,60 @@ const frontendHTML = `<!doctype html>
 			return lines.length > 0 ? lines.join('<br/>') : 'n/a';
 		}
 
+		const storageSamples = new Map();
+
+		function storageStatsView(vm) {
+			const view = document.createElement('div');
+			const disks = Array.isArray(vm.storage) ? vm.storage : [];
+			if (disks.length === 0) {
+				view.textContent = 'n/a';
+				storageSamples.delete(vm.uid);
+				return view;
+			}
+			view.style.minWidth = '260px';
+			const now = performance.now();
+			const previous = storageSamples.get(vm.uid);
+			const elapsed = previous ? (now - previous.time) / 1000 : 0;
+			disks.forEach(function(disk, index) {
+				const item = document.createElement('div');
+				if (index > 0) item.style.marginTop = '12px';
+				const heading = document.createElement('strong');
+				heading.textContent = 'Disk ' + (index + 1) + ' · ' + (disk.read_only ? 'RO' : 'RW') + ' · ' + fmtBytes(disk.capacity_bytes);
+				item.appendChild(heading);
+				const line = function(text) {
+					const el = document.createElement('div');
+					el.textContent = text;
+					item.appendChild(el);
+				};
+				const spec = document.createElement('details');
+				const summary = document.createElement('summary');
+				summary.textContent = 'Backing storage';
+				spec.appendChild(summary);
+				const path = document.createElement('div');
+				path.textContent = disk.spec || 'unknown';
+				path.style.overflowWrap = 'anywhere';
+				spec.appendChild(path);
+				item.appendChild(spec);
+				line('Read ' + fmtBytes(disk.read_bytes) + ' / ' + (disk.read_ops || 0) + ' ops');
+				line('Write ' + fmtBytes(disk.write_bytes) + ' / ' + (disk.write_ops || 0) + ' ops');
+				const old = previous && previous.startedAt === vm.started_at ? previous.disks[index] : null;
+				if (old && old.spec === disk.spec && elapsed > 0 &&
+					disk.read_bytes >= old.read_bytes && disk.write_bytes >= old.write_bytes && disk.completed_ops >= old.completed_ops) {
+					line('R ' + fmtBytes((disk.read_bytes - old.read_bytes) / elapsed) + '/s · W ' +
+						fmtBytes((disk.write_bytes - old.write_bytes) / elapsed) + '/s · ' +
+						((disk.completed_ops - old.completed_ops) / elapsed).toFixed(1) + ' IOPS');
+				} else {
+					line('Throughput: sampling…');
+				}
+				line('Flushes ' + (disk.flush_ops || 0) + ' · Pending ' + (disk.in_flight || 0) + ' · Errors ' + (disk.errors || 0));
+				const avgMS = disk.completed_ops > 0 ? Number(disk.io_time_ns || 0) / disk.completed_ops / 1e6 : 0;
+				line('Latency avg ' + avgMS.toFixed(2) + ' ms · max ' + (Number(disk.max_io_time_ns || 0) / 1e6).toFixed(2) + ' ms');
+				view.appendChild(item);
+			});
+			storageSamples.set(vm.uid, {time: now, startedAt: vm.started_at, disks: disks});
+			return view;
+		}
+
     function showCards(daemon) {
       cards.innerHTML = '';
       const items = [
@@ -859,6 +948,200 @@ const frontendHTML = `<!doctype html>
         cards.appendChild(d);
       }
     }
+
+		function createStatsHistory() {
+			const samples = [];
+			let previousDisks = new Map();
+			const number = value => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : 0;
+			function empty(label) {
+				return {label: label, cpu: null, memory: null, read: null, write: null, iops: null, errors: null, pending: 0, latency: null, latencyNS: 0, latencyOps: 0};
+			}
+			function merge(target, disk) {
+				for (const key of ['read', 'write', 'iops', 'errors']) {
+					if (disk[key] !== null) target[key] = (target[key] || 0) + disk[key];
+				}
+				target.pending += disk.pending;
+				if (disk.latency !== null) {
+					target.latencyNS += disk.latencyNS;
+					target.latencyOps += disk.latencyOps;
+					target.latency = target.latencyOps > 0 ? target.latencyNS / target.latencyOps / 1e6 : 0;
+				}
+			}
+			function record(daemon, vms, at) {
+				if (!Number.isFinite(at) || (samples.length && at <= samples[samples.length - 1].at)) return;
+				const series = new Map();
+				const all = empty('Server / all VMs');
+				all.cpu = 0;
+				all.memory = number(daemon.heap_alloc_bytes);
+				series.set('all', all);
+				const nextDisks = new Map();
+				for (const vm of Array.isArray(vms) ? vms : []) {
+					const vmKey = 'vm:' + vm.uid;
+					const total = empty('VM ' + vm.uid);
+					total.cpu = number(vm.host_cpu_pct);
+					total.memory = number(vm.host_mem_bytes);
+					all.cpu += total.cpu;
+					series.set(vmKey, total);
+					(Array.isArray(vm.storage) ? vm.storage : []).forEach(function(disk, index) {
+						if (!disk) return;
+						const key = vmKey + ':disk:' + index;
+						const identity = JSON.stringify([vm.uid, vm.started_at, index, disk.spec]);
+						const old = previousDisks.get(identity);
+						const point = empty('VM ' + vm.uid + ' / disk ' + (index + 1));
+						point.pending = number(disk.in_flight);
+						const seconds = old ? (at - old.at) / 1000 : 0;
+						const fields = ['read_bytes', 'write_bytes', 'completed_ops', 'errors', 'io_time_ns'];
+						const valid = old && seconds > 0 && fields.every(field =>
+							Number.isFinite(Number(disk[field])) && Number.isFinite(Number(old.disk[field])) && Number(disk[field]) >= Number(old.disk[field]));
+						if (valid) {
+							point.read = (disk.read_bytes - old.disk.read_bytes) / seconds;
+							point.write = (disk.write_bytes - old.disk.write_bytes) / seconds;
+							point.iops = (disk.completed_ops - old.disk.completed_ops) / seconds;
+							point.errors = (disk.errors - old.disk.errors) / seconds;
+							point.latencyOps = disk.completed_ops - old.disk.completed_ops;
+							point.latencyNS = disk.io_time_ns - old.disk.io_time_ns;
+							point.latency = point.latencyOps > 0 ? point.latencyNS / point.latencyOps / 1e6 : 0;
+						}
+						nextDisks.set(identity, {at: at, disk: Object.assign({}, disk)});
+						series.set(key, point);
+						merge(total, point);
+						merge(all, point);
+					});
+				}
+				previousDisks = nextDisks;
+				samples.push({at: at, series: series});
+				while (samples.length > 720 || (samples.length && at - samples[0].at > 3600000)) samples.shift();
+			}
+			return {samples: samples, record: record};
+		}
+
+		const statsHistory = createStatsHistory();
+		const statsHistoryVisibilityKey = 'kubevm_web_stats_history_visible_v1';
+		let statsHistoryVisible = false;
+		const historyMetrics = {
+			throughput: {title: 'Storage throughput', keys: ['read', 'write'], labels: ['Read', 'Write'], format: value => fmtBytes(value) + '/s'},
+			iops: {title: 'Storage IOPS', keys: ['iops'], labels: ['Completed I/O'], format: value => value.toFixed(1) + ' ops/s'},
+			latency: {title: 'Storage average latency', keys: ['latency'], labels: ['Average latency'], format: value => value.toFixed(2) + ' ms'},
+			pending: {title: 'Storage pending requests', keys: ['pending'], labels: ['Pending requests'], format: value => value.toFixed(0)},
+			errors: {title: 'Storage errors / second', keys: ['errors'], labels: ['Failed requests'], format: value => value.toFixed(2) + '/s'},
+			cpu: {title: 'VM host CPU', keys: ['cpu'], labels: ['Host CPU'], format: value => value.toFixed(1) + '%'},
+			memory: {title: 'Memory', keys: ['memory'], labels: ['Memory'], format: value => fmtBytes(value)}
+		};
+
+		function updateHistorySources() {
+			const select = document.getElementById('stats-history-source');
+			if (!select) return;
+			const selected = select.value;
+			const sources = new Map([['all', 'Server / all VMs']]);
+			for (const sample of statsHistory.samples) {
+				for (const [key, point] of sample.series) sources.set(key, point.label);
+			}
+			select.textContent = '';
+			for (const [key, label] of sources) {
+				const option = document.createElement('option');
+				option.value = key;
+				option.textContent = label;
+				select.appendChild(option);
+			}
+			select.value = sources.has(selected) ? selected : 'all';
+		}
+
+		function renderStatsHistory() {
+			if (!statsHistoryVisible) return;
+			const container = document.getElementById('stats-history-chart');
+			const summary = document.getElementById('stats-history-summary');
+			const legend = document.getElementById('stats-history-legend');
+			const source = document.getElementById('stats-history-source');
+			const metric = historyMetrics[document.getElementById('stats-history-metric').value] || historyMetrics.throughput;
+			const windowMS = Number(document.getElementById('stats-history-window').value) * 60000;
+			const end = statsHistory.samples.length ? statsHistory.samples[statsHistory.samples.length - 1].at : Date.now();
+			const start = end - windowMS;
+			const samples = statsHistory.samples.filter(sample => sample.at >= start);
+			container.textContent = '';
+			legend.textContent = '';
+			const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+			svg.setAttribute('viewBox', '0 0 900 290');
+			svg.setAttribute('role', 'img');
+			svg.setAttribute('aria-label', metric.title + ' history for ' + source.options[source.selectedIndex].textContent);
+			function element(tag, attributes, text) {
+				const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+				for (const key of Object.keys(attributes)) el.setAttribute(key, String(attributes[key]));
+				if (text !== undefined) el.textContent = text;
+				svg.appendChild(el);
+				return el;
+			}
+			const values = [];
+			for (const sample of samples) {
+				const point = sample.series.get(source.value);
+				if (point) for (const key of metric.keys) if (Number.isFinite(point[key])) values.push(point[key]);
+			}
+			const max = Math.max(1, ...values) * 1.1;
+			const x = at => 115 + (at - start) / windowMS * 765;
+			const y = value => 245 - value / max * 220;
+			for (let i = 0; i <= 4; i++) {
+				const value = max * i / 4;
+				element('line', {x1: 115, x2: 880, y1: y(value), y2: y(value), class: 'chart-grid'});
+				element('text', {x: 105, y: y(value) + 4, 'text-anchor': 'end'}, metric.format(value));
+			}
+			for (let i = 0; i <= 2; i++) {
+				const at = start + windowMS * i / 2;
+				element('text', {x: x(at), y: 274, 'text-anchor': i === 2 ? 'end' : 'start'}, new Date(at).toLocaleTimeString());
+			}
+			const colors = ['var(--accent)', 'var(--accent-2)'];
+			metric.keys.forEach(function(key, index) {
+				let segment = [];
+				let previousAt = null;
+				function flush() {
+					if (segment.length === 1) element('circle', {cx: segment[0][0], cy: segment[0][1], r: 3, fill: colors[index]});
+					if (segment.length > 1) element('polyline', {points: segment.map(point => point.join(',')).join(' '), stroke: colors[index], class: 'chart-series'});
+					segment = [];
+				}
+				for (const sample of samples) {
+					const point = sample.series.get(source.value);
+					const value = point ? point[key] : null;
+					if (!Number.isFinite(value)) { flush(); previousAt = null; continue; }
+					if (previousAt !== null && sample.at - previousAt > 20000) flush();
+					segment.push([x(sample.at), y(value)]);
+					previousAt = sample.at;
+				}
+				flush();
+				const label = document.createElement('span');
+				label.className = 'history-key';
+				label.style.setProperty('--series-color', colors[index]);
+				label.textContent = metric.labels[index];
+				legend.appendChild(label);
+			});
+			if (values.length === 0) element('text', {x: 500, y: 130, 'text-anchor': 'middle'}, 'Waiting for samples for this source and metric…');
+			container.appendChild(svg);
+			const latestSample = samples.length ? samples[samples.length - 1].series.get(source.value) : null;
+			const latest = metric.keys.map((key, index) => metric.labels[index] + ': ' +
+				(latestSample && Number.isFinite(latestSample[key]) ? metric.format(latestSample[key]) : 'n/a'));
+			summary.textContent = latest.join(' · ') + ' · ' + samples.length + ' samples in view';
+		}
+
+		function setStatsHistoryVisible(visible) {
+			statsHistoryVisible = Boolean(visible);
+			const panel = document.getElementById('stats-history');
+			const button = document.getElementById('stats-history-toggle');
+			panel.hidden = !statsHistoryVisible;
+			button.textContent = statsHistoryVisible ? 'Hide History' : 'Show History';
+			button.setAttribute('aria-expanded', String(statsHistoryVisible));
+			button.classList.toggle('toggle-on', statsHistoryVisible);
+			button.classList.toggle('toggle-off', !statsHistoryVisible);
+			try { localStorage.setItem(statsHistoryVisibilityKey, statsHistoryVisible ? '1' : '0'); } catch (_) {}
+			renderStatsHistory();
+		}
+
+		function initStatsHistory() {
+			const button = document.getElementById('stats-history-toggle');
+			button.addEventListener('click', () => setStatsHistoryVisible(!statsHistoryVisible));
+			for (const id of ['stats-history-source', 'stats-history-metric', 'stats-history-window']) {
+				document.getElementById(id).addEventListener('change', renderStatsHistory);
+			}
+			let visible = false;
+			try { visible = localStorage.getItem(statsHistoryVisibilityKey) === '1'; } catch (_) {}
+			setStatsHistoryVisible(visible);
+		}
 
     async function stopVM(uid) {
       statusEl.textContent = 'stopping ' + uid + '...';
@@ -905,8 +1188,12 @@ const frontendHTML = `<!doctype html>
 
     function showRows(vms) {
       rows.innerHTML = '';
+			const present = new Set((Array.isArray(vms) ? vms : []).map(vm => vm.uid));
+			for (const uid of storageSamples.keys()) {
+				if (!present.has(uid)) storageSamples.delete(uid);
+			}
       if (!Array.isArray(vms) || vms.length === 0) {
-				rows.innerHTML = '<tr><td colspan="11" class="mono">No virtual machines are currently registered.</td></tr>';
+				rows.innerHTML = '<tr><td colspan="12" class="mono">No virtual machines are currently registered.</td></tr>';
         return;
       }
       for (const vm of vms) {
@@ -924,13 +1211,15 @@ const frontendHTML = `<!doctype html>
           '<td class="mono">' + bootLabel(vm) + '</td>' +
 		  '<td class="mono">' + networkLabel(vm) + '</td>' +
 				'<td class="mono">' + nicStatsLabel(vm) + '</td>' +
+				'<td class="mono" data-storage="1"></td>' +
           '<td><button class="warn" data-stop="1" data-uid="' + vm.uid + '">Stop</button> ' +
           '<button class="ghost" data-pause="1" data-uid="' + vm.uid + '">Pause</button> ' +
           '<button class="ghost" data-resume="1" data-uid="' + vm.uid + '">Resume</button> ' +
           '<button class="ghost" data-save="1" data-uid="' + vm.uid + '">Save</button> ' +
           '<button class="ghost" data-restore="1" data-uid="' + vm.uid + '">Restore</button> ' +
           '<button class="ghost" data-console="1" data-uid="' + vm.uid + '">Console</button></td>';
-        tr.querySelector('button[data-stop]').addEventListener('click', () => stopVM(vm.uid).catch(err => statusEl.textContent = err.message));
+				tr.querySelector('[data-storage]').appendChild(storageStatsView(vm));
+				tr.querySelector('button[data-stop]').addEventListener('click', () => stopVM(vm.uid).catch(err => statusEl.textContent = err.message));
         tr.querySelector('button[data-pause]').addEventListener('click', () => pauseVM(vm.uid).catch(err => statusEl.textContent = err.message));
         tr.querySelector('button[data-resume]').addEventListener('click', () => resumeVM(vm.uid).catch(err => statusEl.textContent = err.message));
         tr.querySelector('button[data-save]').addEventListener('click', () => saveVM(vm.uid).catch(err => statusEl.textContent = err.message));
@@ -945,8 +1234,11 @@ const frontendHTML = `<!doctype html>
 
     async function refresh() {
       const body = await api('/api/v1/vms');
+			statsHistory.record(body.daemon || {}, body.vms || [], Date.now());
+			updateHistorySources();
       showCards(body.daemon || {});
       showRows(body.vms || []);
+			renderStatsHistory();
     }
 
 		function ensureTerminal() {
@@ -1674,6 +1966,7 @@ const refreshBtn = document.getElementById('refresh');
 		}
 
 		initTheme();
+		initStatsHistory();
 		ensureTerminal();
 		refreshBaseDiskOptions().catch(() => {});
 		refreshGlobalConfigs().catch(() => {});

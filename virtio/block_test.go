@@ -1,6 +1,7 @@
 package virtio
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -8,6 +9,59 @@ import (
 
 	"kube-vm/virtio/virtq"
 )
+
+func TestBlockHandlerScatterGatherAndFlush(t *testing.T) {
+	storage := &syncStorage{buf: make([]byte, 4096)}
+	h := &blockHandler{cfg: BlockDevice{Storage: storage}, r: storage, w: storage, s: storage}
+	for _, op := range []uint32{blkTOut, blkTIn, blkTFlush} {
+		hdr := make([]byte, 16)
+		binary.LittleEndian.PutUint32(hdr, op)
+		binary.LittleEndian.PutUint64(hdr[8:], 1)
+		status := []byte{0xff}
+		buffers := [][]byte{hdr}
+		if op != blkTFlush {
+			buffers = append(buffers, []byte("abcd"), []byte("efgh"))
+			if op == blkTIn {
+				clear(buffers[1])
+				clear(buffers[2])
+			}
+		}
+		buffers = append(buffers, status)
+		ring := make([]virtq.Desc, len(buffers))
+		for i, buf := range buffers {
+			flags := uint16(virtq.DescFAvail | virtq.DescFNext)
+			if i == len(buffers)-1 {
+				flags = virtq.DescFAvail | virtq.DescFWrite
+			} else if i > 0 && op == blkTIn {
+				flags |= virtq.DescFWrite
+			}
+			ring[i] = virtq.Desc{Addr: uint64(i), Len: uint32(len(buf)), Flags: flags}
+		}
+		ring[len(ring)-1].ID = 123
+		q := virtq.New(ring, nil, nil, virtq.Config{
+			MemAt: func(addr uint64, length int) ([]byte, error) { return buffers[int(addr)], nil },
+		})
+		if err := h.handle(q); err != nil {
+			t.Fatalf("op %d: %v", op, err)
+		}
+		if status[0] != blkSOK || ring[0].ID != 123 {
+			t.Fatalf("op %d: status=%d ID=%d", op, status[0], ring[0].ID)
+		}
+		wantLen := uint32(1)
+		if op == blkTIn {
+			wantLen += 8
+			if !bytes.Equal(append(buffers[1], buffers[2]...), []byte("abcdefgh")) {
+				t.Fatal("scatter/gather read returned incorrect data")
+			}
+		}
+		if ring[0].Len != wantLen {
+			t.Fatalf("op %d: used length=%d, want %d", op, ring[0].Len, wantLen)
+		}
+	}
+	if !bytes.Equal(storage.buf[512:520], []byte("abcdefgh")) || !storage.syncCalled {
+		t.Fatal("scatter/gather write or flush not performed")
+	}
+}
 
 type syncStorage struct {
 	buf        []byte

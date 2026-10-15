@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"kube-vm/virtio"
 )
 
 const consoleHistoryLimit = 500
@@ -109,6 +111,7 @@ type VMDetails struct {
 	HostCPUPct   float64  `json:"host_cpu_pct,omitempty"`
 	LastError    string   `json:"last_error,omitempty"`
 	NICs         []VMNIC  `json:"nics,omitempty"`
+	Storage      []virtio.BlockStats `json:"storage,omitempty"`
 }
 
 // Request is a JSON request sent over the control socket.

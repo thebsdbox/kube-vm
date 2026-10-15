@@ -356,6 +356,11 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	if len(netCfg.NICs) > 0 {
 		vmc.nics = append(vmc.nics[:0], netCfg.NICs...)
 	}
+	for _, device := range cfg.Devices {
+		if block, ok := device.(*virtio.BlockDevice); ok && block.Metrics != nil {
+			vmc.storage = append(vmc.storage, block.Metrics)
+		}
+	}
 
 	logVM(uid, "start", "creating VMM instance")
 	m, err := vmm.New(cfg)
@@ -584,6 +589,7 @@ type vmController struct {
 	natGateway     string
 	natGuestIP     string
 	nics           []vmnet.NICStatsSource
+	storage        []*virtio.BlockMetrics
 	block          []string
 	lastError      string
 	hostCPUSec     float64
@@ -615,6 +621,7 @@ type vmStats struct {
 	NATGuestIP   string     `json:"nat_guest_ip,omitempty"`
 	NICs         []nicStats `json:"nics,omitempty"`
 	Block        []string   `json:"block,omitempty"`
+	Storage      []virtio.BlockStats `json:"storage,omitempty"`
 	HostMemBytes uint64     `json:"host_mem_bytes,omitempty"`
 	HostCPUSec   float64    `json:"host_cpu_sec,omitempty"`
 	HostCPUPct   float64    `json:"host_cpu_pct,omitempty"`
@@ -663,6 +670,7 @@ func vmDetailsFromSnapshot(snap vmStats) control.VMDetails {
 		HostCPUSec:   snap.HostCPUSec,
 		HostCPUPct:   snap.HostCPUPct,
 		LastError:    snap.LastError,
+		Storage:      append([]virtio.BlockStats(nil), snap.Storage...),
 	}
 	if len(snap.Block) > 0 {
 		out.Block = append([]string(nil), snap.Block...)
@@ -796,6 +804,11 @@ func (c *vmController) snapshot(now time.Time) vmStats {
 	}
 	if len(c.block) > 0 {
 		out.Block = append([]string(nil), c.block...)
+	}
+	for _, disk := range c.storage {
+		if disk != nil {
+			out.Storage = append(out.Storage, disk.Snapshot())
+		}
 	}
 	if len(c.nics) > 0 {
 		out.NICs = make([]nicStats, 0, len(c.nics))

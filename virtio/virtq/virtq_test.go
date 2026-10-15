@@ -18,6 +18,108 @@ var nopConfig = virtq.Config{
 	Notify: nopNotify,
 }
 
+func TestPackedQueueRepeatedWrappedChains(t *testing.T) {
+	ring := make([]virtq.Desc, 8)
+	notifications := 0
+	q := virtq.New(ring, new(virtq.EventSuppress), nil, virtq.Config{
+		Notify: func() error { notifications++; return nil },
+	})
+	index, wrap := 0, true
+	for request := 0; request < 10000; request++ {
+		count := 1 + request%3
+		head := index
+		id := uint16(request + 1)
+		for segment := 0; segment < count; segment++ {
+			flags := uint16(virtq.DescFUsed)
+			if wrap {
+				flags = virtq.DescFAvail
+			}
+			if segment+1 < count {
+				flags |= virtq.DescFNext
+			}
+			ring[index] = virtq.Desc{Addr: uint64(segment + 1), Flags: flags}
+			if segment+1 == count {
+				ring[index].ID = id
+			}
+			index++
+			if index == len(ring) {
+				index = 0
+				wrap = !wrap
+			}
+		}
+		chain, err := q.Next()
+		if err != nil || chain == nil {
+			t.Fatalf("request %d: Next = (%v, %v)", request, chain, err)
+		}
+		if len(chain.Desc) != count {
+			t.Fatalf("request %d: descriptors = %d, want %d", request, len(chain.Desc), count)
+		}
+		for i, desc := range chain.Desc {
+			if desc.Addr != uint64(i+1) {
+				t.Fatalf("request %d: segment %d out of order", request, i)
+			}
+		}
+		if err := chain.Release(1); err != nil {
+			t.Fatal(err)
+		}
+		if ring[head].ID != id {
+			t.Fatalf("request %d: completion ID = %d, want %d", request, ring[head].ID, id)
+		}
+		if next, err := q.Next(); next != nil || err != nil {
+			t.Fatalf("request %d: consumed chain offered again: %v, %v", request, next, err)
+		}
+	}
+	if notifications != 10000 {
+		t.Fatalf("notifications = %d, want 10000", notifications)
+	}
+}
+
+func TestPackedQueueIndependentAvailableAndUsedWrap(t *testing.T) {
+	ring := []virtq.Desc{
+		{ID: 10, Flags: virtq.DescFAvail},
+		{ID: 11, Flags: virtq.DescFAvail},
+	}
+	q := virtq.New(ring, nil, nil, virtq.Config{})
+	first, err := q.Next()
+	if err != nil || first == nil {
+		t.Fatalf("first Next: %v, %v", first, err)
+	}
+	second, err := q.Next()
+	if err != nil || second == nil {
+		t.Fatalf("second Next: %v, %v", second, err)
+	}
+	if next, err := q.Next(); next != nil || err != nil {
+		t.Fatalf("uncompleted ring offered again: %v, %v", next, err)
+	}
+	if err := first.Release(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPackedQueueNotifyOffsetInsideChain(t *testing.T) {
+	ring := []virtq.Desc{
+		{Flags: virtq.DescFAvail | virtq.DescFNext},
+		{ID: 42, Flags: virtq.DescFAvail},
+	}
+	notified := false
+	q := virtq.New(ring, &virtq.EventSuppress{Desc: 1 | 1<<15, Flags: 2}, nil, virtq.Config{
+		Notify: func() error { notified = true; return nil },
+	})
+	chain, err := q.Next()
+	if err != nil || chain == nil {
+		t.Fatalf("Next: %v, %v", chain, err)
+	}
+	if err := chain.Release(1); err != nil {
+		t.Fatal(err)
+	}
+	if !notified {
+		t.Fatal("missed event offset inside completed chain")
+	}
+}
+
 func TestQ(t *testing.T) {
 	t.Run("nil ring", func(t *testing.T) {
 		q := virtq.New(nil, nil, nil, virtq.Config{})

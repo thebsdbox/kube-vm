@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-const defaultCOWClusterSize int64 = 64 << 10
+const defaultCOWClusterSize int64 = 4 << 10
 
 var cowStorageMagic = [16]byte{'k', 'u', 'b', 'e', 'v', 'm', '-', 'c', 'o', 'w', '-', 'v', '1'}
 
@@ -99,7 +99,7 @@ func (cs *COWStorage) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("cow storage read negative offset %d", off)
 	}
-	if off >= cs.size {
+	if off >= cs.size || off+int64(len(p)) > cs.size {
 		return 0, io.EOF
 	}
 
@@ -143,14 +143,8 @@ func (cs *COWStorage) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("cow storage write negative offset %d", off)
 	}
-	if off >= cs.size {
+	if off >= cs.size || off+int64(len(p)) > cs.size {
 		return 0, io.EOF
-	}
-
-	requested := len(p)
-	remaining := cs.size - off
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
 	}
 
 	written := 0
@@ -172,9 +166,6 @@ func (cs *COWStorage) WriteAt(p []byte, off int64) (int, error) {
 		written += chunk
 	}
 
-	if written < len(p) || written < requested {
-		return written, io.ErrShortWrite
-	}
 	return written, nil
 }
 
@@ -185,9 +176,13 @@ func (cs *COWStorage) Size() (int64, error) {
 }
 
 func (cs *COWStorage) Sync() error {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.Overlay.Sync()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if err := cs.Overlay.Sync(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (cs *COWStorage) writeHeader() error {

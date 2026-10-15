@@ -33,4 +33,6 @@ version = 2
             
 EOF
 RUN sudo systemctl enable containerd
+RUN curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/v0.20.1/cilium-linux-amd64.tar.gz; tar -xvzf cilium-linux-amd64.tar.gz; rm cilium-linux-amd64.tar.gz; mv cilium /usr/bin/
+
 CMD ["/lib/systemd/systemd"]

@@ -30,6 +30,13 @@ func TestBlockDeviceFromSpecWithOverlayUsesCopyOnWriteStorage(t *testing.T) {
 	if dev.ReadOnly {
 		t.Fatal("device unexpectedly marked read-only")
 	}
+	if dev.Metrics == nil {
+		t.Fatal("missing storage statistics")
+	}
+	metrics := dev.Metrics.Snapshot()
+	if metrics.Spec != spec || metrics.CapacityBytes != uint64(len(baseData)) || metrics.ReadOnly {
+		t.Fatalf("storage metadata: %+v", metrics)
+	}
 
 	writer, ok := dev.Storage.(io.WriterAt)
 	if !ok {
