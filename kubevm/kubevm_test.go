@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,13 @@ func TestVMServerShutdownRemovesStaleEntry(t *testing.T) {
 
 	if _, ok := s.vms["abc123"]; ok {
 		t.Fatal("vm server still contains a shutdown VM entry")
+	}
+}
+
+func TestDefaultOptionsStartInLocalMode(t *testing.T) {
+	opts := DefaultOptions()
+	if opts.ServerMode {
+		t.Fatal("DefaultOptions should not enable server mode by default")
 	}
 }
 
@@ -162,5 +171,111 @@ func TestWaitForConsoleSocketReturnsContextError(t *testing.T) {
 	err := waitForConsoleSocket(ctx, filepath.Join(t.TempDir(), "console.sock"), make(chan error), time.Second)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForConsoleSocket error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestVMServerSavedConfigsPersistAcrossReload(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "saved-configs.json")
+	server := &vmServer{configsPath: configPath, defaultStart: map[string]any{"kernel": "bzImage"}}
+	payload := map[string]any{"mem": "2048", "cpu": "2", "kernel": "bzImage"}
+
+	stored, err := server.saveConfig(map[string]any{"name": "ubuntu", "payload": payload})
+	if err != nil {
+		t.Fatalf("saveConfig returned error: %v", err)
+	}
+	if stored["id"] == "" {
+		t.Fatal("saveConfig did not return a persisted config id")
+	}
+
+	reloaded := &vmServer{configsPath: configPath, defaultStart: map[string]any{"kernel": "bzImage"}}
+	configs := reloaded.defaultConfigs()
+	if len(configs) != 2 {
+		t.Fatalf("len(defaultConfigs()) = %d, want 2", len(configs))
+	}
+	if configs[1]["name"] != "ubuntu" {
+		t.Fatalf("saved config name = %q, want %q", configs[1]["name"], "ubuntu")
+	}
+	if asString(configs[1]["payload"].(map[string]any), "mem", "") != "2048" {
+		t.Fatalf("payload mem = %q, want %q", asString(configs[1]["payload"].(map[string]any), "mem", ""), "2048")
+	}
+}
+
+func TestAsStringSliceSplitsNewlineDelimitedBlockSpecs(t *testing.T) {
+	payload := map[string]any{"block": []any{"/home/dan/ginit/initramfs.raw\n./disks/test.img"}}
+	got := asStringSlice(payload, "block")
+	if len(got) != 2 {
+		t.Fatalf("len(asStringSlice(...)) = %d, want 2", len(got))
+	}
+	if got[0] != "/home/dan/ginit/initramfs.raw" {
+		t.Fatalf("got[0] = %q, want %q", got[0], "/home/dan/ginit/initramfs.raw")
+	}
+	if got[1] != "./disks/test.img" {
+		t.Fatalf("got[1] = %q, want %q", got[1], "./disks/test.img")
+	}
+}
+
+func TestNormalizeBaseDiskPayloadMovesBaseDiskToCOWBlock(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "base-disks")
+	vmDir := filepath.Join(root, "vms")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll base dir: %v", err)
+	}
+	basePath := filepath.Join(baseDir, "ubuntu.img")
+	if err := os.WriteFile(basePath, []byte("base"), 0o644); err != nil {
+		t.Fatalf("WriteFile base disk: %v", err)
+	}
+	t.Setenv("KUBE_VM_BASE_DISK_DIR", baseDir)
+	t.Setenv("KUBE_VM_VM_DIR", vmDir)
+
+	payload := map[string]any{"base_disk": basePath}
+	if err := normalizeBaseDiskPayload("vm-123", payload); err != nil {
+		t.Fatalf("normalizeBaseDiskPayload returned error: %v", err)
+	}
+	if _, ok := payload["base_disk"]; ok {
+		t.Fatal("base_disk should be removed after normalization")
+	}
+	blocks := asStringSlice(payload, "block")
+	if len(blocks) != 1 {
+		t.Fatalf("len(blocks) = %d, want 1", len(blocks))
+	}
+	if !strings.HasPrefix(blocks[0], "cow:"+basePath+"?overlay=") {
+		t.Fatalf("block spec = %q, want cow spec rooted at %q", blocks[0], basePath)
+	}
+	if strings.Contains(blocks[0], ":ro") {
+		t.Fatalf("block spec = %q, want writable CoW overlay", blocks[0])
+	}
+	if _, err := os.Stat(filepath.Join(vmDir, "vm-123", "ubuntu.img")); err != nil {
+		t.Fatalf("overlay path was not created: %v", err)
+	}
+}
+
+func TestNormalizeBaseDiskPayloadConvertsReadOnlyBaseDiskBlockToWritableCOW(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "base-disks")
+	vmDir := filepath.Join(root, "vms")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll base dir: %v", err)
+	}
+	basePath := filepath.Join(baseDir, "ubuntu.img")
+	if err := os.WriteFile(basePath, []byte("base"), 0o644); err != nil {
+		t.Fatalf("WriteFile base disk: %v", err)
+	}
+	t.Setenv("KUBE_VM_BASE_DISK_DIR", baseDir)
+	t.Setenv("KUBE_VM_VM_DIR", vmDir)
+
+	payload := map[string]any{"block": []string{basePath + ":ro"}}
+	if err := normalizeBaseDiskPayload("vm-456", payload); err != nil {
+		t.Fatalf("normalizeBaseDiskPayload returned error: %v", err)
+	}
+	blocks := asStringSlice(payload, "block")
+	if len(blocks) != 1 {
+		t.Fatalf("len(blocks) = %d, want 1", len(blocks))
+	}
+	if strings.Contains(blocks[0], ":ro") {
+		t.Fatalf("block spec = %q, want writable CoW overlay", blocks[0])
+	}
+	if !strings.HasPrefix(blocks[0], "cow:"+basePath+"?overlay=") {
+		t.Fatalf("block spec = %q, want cow spec rooted at %q", blocks[0], basePath)
 	}
 }

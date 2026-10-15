@@ -6,5 +6,5 @@ sessionname kube-vm-test
 screen 0 sudo bin/kube-vm -server -web-port 9090 -web-token "password" -web-host "0.0.0.0" > /tmp/kube-vm.logs
 split
 focus down
-resize 75%
+resize 60%
 screen 1 env PATH="$PATH:./bin" bash

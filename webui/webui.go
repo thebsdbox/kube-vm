@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +29,9 @@ type Service struct {
 	DaemonStats         func() any
 	DefaultStartPayload func() map[string]any
 	GlobalConfigs       func() []map[string]any
+	BaseDisks           func() []string
+	SaveConfig          func(item map[string]any) (map[string]any, error)
+	DeleteConfig        func(id string) error
 	ConsoleSocket       func(uid string) (string, error)
 }
 
@@ -44,6 +49,14 @@ func Serve(ctx context.Context, addr string, svc Service, token string) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, frontendHTML)
 	})
+	mux.HandleFunc("/console", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/console" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, consoleOnlyHTML)
+	})
 
 	api := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +66,7 @@ func Serve(ctx context.Context, addr string, svc Service, token string) error {
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal server error"})
 				}
 			}()
-			if token != "" && !authorized(r, token) {
+			if token != "" && !authorized(r, token) && !consoleReadOnlyPollRequest(r) {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
 				return
 			}
@@ -73,16 +86,85 @@ func Serve(ctx context.Context, addr string, svc Service, token string) error {
 		})
 	}))
 
-	mux.HandleFunc("/api/v1/configs/global", api(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/disks/base", api(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		configs := []map[string]any{}
-		if svc.GlobalConfigs != nil {
-			configs = svc.GlobalConfigs()
+		disks := []string{}
+		if svc.BaseDisks != nil {
+			disks = svc.BaseDisks()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "configs": configs})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "disks": disks})
+	}))
+
+	mux.HandleFunc("/api/v1/configs/global", api(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			configs := []map[string]any{}
+			if svc.GlobalConfigs != nil {
+				configs = svc.GlobalConfigs()
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "configs": configs})
+			return
+		case http.MethodPost:
+			if svc.SaveConfig == nil {
+				writeJSON(w, http.StatusNotImplemented, map[string]any{"ok": false, "error": "config saving is not available"})
+				return
+			}
+			var item map[string]any
+			if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+				if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON config"})
+					return
+				}
+			} else {
+				if err := r.ParseForm(); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid form config"})
+					return
+				}
+				item = map[string]any{}
+				for key, values := range r.Form {
+					if len(values) == 0 {
+						continue
+					}
+					item[key] = values[0]
+				}
+			}
+			if item == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "missing config payload"})
+				return
+			}
+			cfg, err := svc.SaveConfig(item)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg})
+			return
+		case http.MethodDelete:
+			if svc.DeleteConfig == nil {
+				writeJSON(w, http.StatusNotImplemented, map[string]any{"ok": false, "error": "config deletion is not available"})
+				return
+			}
+			id := strings.TrimSpace(r.URL.Query().Get("id"))
+			if id == "" {
+				_ = r.ParseForm()
+				id = strings.TrimSpace(r.FormValue("id"))
+			}
+			if id == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "id is required"})
+				return
+			}
+			if err := svc.DeleteConfig(id); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+			return
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		}
 	}))
 
 	mux.HandleFunc("/api/v1/vms/start", api(func(w http.ResponseWriter, r *http.Request) {
@@ -297,19 +379,26 @@ func Serve(ctx context.Context, addr string, svc Service, token string) error {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "id is required"})
 			return
 		}
+		offset := int64(0)
+		if rawOffset := strings.TrimSpace(r.URL.Query().Get("offset")); rawOffset != "" {
+			parsedOffset, err := strconv.ParseInt(rawOffset, 10, 64)
+			if err != nil || parsedOffset < 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "offset must be a non-negative integer"})
+				return
+			}
+			offset = parsedOffset
+		}
 		s := mgr.get(sid)
 		if s == nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "console session not found"})
 			return
 		}
-		chunk, closed := s.poll()
-		if closed {
-			mgr.remove(sid)
-		}
+		chunk, closed, nextOffset := s.poll(offset)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":       true,
 			"closed":   closed,
 			"data_b64": base64.StdEncoding.EncodeToString(chunk),
+			"offset":   nextOffset,
 		})
 	}))
 

@@ -30,6 +30,7 @@ func main() {
 	flag.StringVar(&opts.InitrdPath, "initrd", opts.InitrdPath, "load initial ramdisk from file or URL")
 	flag.StringVar(&opts.ISOPath, "iso", opts.ISOPath, "attach ISO image from file or URL as read-only block device")
 	flag.StringVar(&opts.Cmdline, "cmdline", opts.Cmdline, "set the kernel command line")
+	flag.BoolVar(&opts.SerialConsole, "serial-console", opts.SerialConsole, "attach a COM1 serial console and switch the stock cmdline to ttyS0 unless --cmdline overrides it")
 	flag.StringVar(&opts.TapName, "tap", opts.TapName, "attach a virtio-net device backed by TAP (optional name)")
 	flag.BoolVar(&opts.NATMode, "nat", opts.NATMode, "attach a virtio-net device with host NAT (Linux only)")
 	flag.BoolVar(&opts.VhostNet, "vhost-net", opts.VhostNet, "enable vhost-net acceleration for TAP networking (Linux only, requires -tap)")
@@ -42,7 +43,10 @@ func main() {
 	flag.BoolVar(&opts.ServerMode, "server", opts.ServerMode, "run kube-vm in server mode and accept control requests over a UNIX socket")
 	flag.Var(&blkdev, "block", "add a block device (multiple OK)")
 	flag.Var(&cowblk, "cow-block", "add a writable copy-on-write block device as BASE=OVERLAY (multiple OK)")
-	flag.Parse()
+	if err := flag.CommandLine.Parse(standaloneArgs(os.Args[1:])); err != nil {
+		fmt.Fprintf(os.Stderr, "kube-vm: %v\n", err)
+		os.Exit(2)
+	}
 	opts.VSOCKPort = uint32(vsockPort)
 	blockSpecs, err := vmconfig.MergeBlockSpecs([]string(blkdev), []string(cowblk))
 	if err != nil {
@@ -76,6 +80,18 @@ func (*flagStrings) String() string {
 func (fs *flagStrings) Set(s string) error {
 	*fs = append(*fs, s)
 	return nil
+}
+
+func standaloneArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	switch args[0] {
+	case "start", "run", "boot":
+		return args[1:]
+	default:
+		return args
+	}
 }
 
 func setupLogging(runtimeDir string) {

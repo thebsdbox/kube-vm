@@ -3,9 +3,11 @@ package kubevm
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -25,24 +27,25 @@ import (
 )
 
 type Options struct {
-	MemSize      int
-	NumCPU       int
-	FirmwarePath string
-	KernelPath   string
-	InitrdPath   string
-	ISOPath      string
-	Cmdline      string
-	TapName      string
-	NATMode      bool
-	VhostNet     bool
-	VSOCKCID     uint64
-	VSOCKPort    uint32
-	SocketPath   string
-	WebHost      string
-	WebPort      int
-	WebToken     string
-	ServerMode   bool
-	BlockSpecs   []string
+	MemSize       int
+	NumCPU        int
+	FirmwarePath  string
+	KernelPath    string
+	InitrdPath    string
+	ISOPath       string
+	Cmdline       string
+	SerialConsole bool
+	TapName       string
+	NATMode       bool
+	VhostNet      bool
+	VSOCKCID      uint64
+	VSOCKPort     uint32
+	SocketPath    string
+	WebHost       string
+	WebPort       int
+	WebToken      string
+	ServerMode    bool
+	BlockSpecs    []string
 }
 
 func DefaultOptions() Options {
@@ -50,10 +53,10 @@ func DefaultOptions() Options {
 		MemSize:    1024,
 		NumCPU:     1,
 		KernelPath: "bzImage",
-		Cmdline:    "console=hvc0 reboot=t",
+		Cmdline:    "console=hvc0 root=/dev/vda reboot=t",
 		SocketPath: "/tmp/kube-vm/kube-vm.sock",
 		WebHost:    "127.0.0.1",
-		ServerMode: true,
+		ServerMode: false,
 	}
 }
 
@@ -73,9 +76,10 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	server := &vmServer{
-		ctx:        ctx,
-		socketPath: opts.SocketPath,
-		startedAt:  time.Now(),
+		ctx:         ctx,
+		socketPath:  opts.SocketPath,
+		configsPath: filepath.Join(filepath.Dir(opts.SocketPath), "saved-configs.json"),
+		startedAt:   time.Now(),
 	}
 	go func() {
 		if err := control.Serve(ctx, opts.SocketPath, server); err != nil {
@@ -85,18 +89,19 @@ func Run(ctx context.Context, opts Options) error {
 
 	if opts.WebPort > 0 {
 		server.defaultStart = map[string]any{
-			"mem":       opts.MemSize,
-			"cpu":       opts.NumCPU,
-			"firmware":  opts.FirmwarePath,
-			"kernel":    opts.KernelPath,
-			"initrd":    opts.InitrdPath,
-			"iso":       opts.ISOPath,
-			"cmdline":   opts.Cmdline,
-			"tap":       opts.TapName,
-			"nat":       opts.NATMode,
-			"vhost":     opts.VhostNet,
-			"vsock":     opts.VSOCKPort,
-			"vsock-cid": opts.VSOCKCID,
+			"mem":            opts.MemSize,
+			"cpu":            opts.NumCPU,
+			"firmware":       opts.FirmwarePath,
+			"kernel":         opts.KernelPath,
+			"initrd":         opts.InitrdPath,
+			"iso":            opts.ISOPath,
+			"cmdline":        opts.Cmdline,
+			"serial_console": opts.SerialConsole,
+			"tap":            opts.TapName,
+			"nat":            opts.NATMode,
+			"vhost":          opts.VhostNet,
+			"vsock":          opts.VSOCKPort,
+			"vsock-cid":      opts.VSOCKCID,
 		}
 		if len(opts.BlockSpecs) > 0 {
 			blocks := make([]string, len(opts.BlockSpecs))
@@ -119,6 +124,9 @@ func Run(ctx context.Context, opts Options) error {
 				DaemonStats:         func() any { return server.daemonStats() },
 				DefaultStartPayload: server.defaultStartPayload,
 				GlobalConfigs:       server.defaultConfigs,
+				BaseDisks:           server.listBaseDisks,
+				SaveConfig:          server.saveConfig,
+				DeleteConfig:        server.deleteConfig,
 				ConsoleSocket:       server.consoleSocket,
 			}
 			if err := webui.Serve(ctx, addr, svc, opts.WebToken); err != nil {
@@ -140,22 +148,23 @@ func Run(ctx context.Context, opts Options) error {
 
 func runLocalVM(ctx context.Context, opts Options) error {
 	cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
-		UID:          "local",
-		FirmwarePath: opts.FirmwarePath,
-		KernelPath:   opts.KernelPath,
-		InitrdPath:   opts.InitrdPath,
-		BlockSpecs:   append([]string(nil), opts.BlockSpecs...),
-		ISOPath:      opts.ISOPath,
-		Cmdline:      opts.Cmdline,
-		MemMiB:       opts.MemSize,
-		NumCPU:       opts.NumCPU,
-		TapName:      opts.TapName,
-		NATMode:      opts.NATMode,
-		VhostNet:     opts.VhostNet,
-		VSOCKCID:     opts.VSOCKCID,
-		VSOCKPort:    opts.VSOCKPort,
-		ConsoleIn:    os.Stdin,
-		ConsoleOut:   os.Stdout,
+		UID:           "local",
+		FirmwarePath:  opts.FirmwarePath,
+		KernelPath:    opts.KernelPath,
+		InitrdPath:    opts.InitrdPath,
+		BlockSpecs:    append([]string(nil), opts.BlockSpecs...),
+		ISOPath:       opts.ISOPath,
+		Cmdline:       opts.Cmdline,
+		SerialConsole: opts.SerialConsole,
+		MemMiB:        opts.MemSize,
+		NumCPU:        opts.NumCPU,
+		TapName:       opts.TapName,
+		NATMode:       opts.NATMode,
+		VhostNet:      opts.VhostNet,
+		VSOCKCID:      opts.VSOCKCID,
+		VSOCKPort:     opts.VSOCKPort,
+		ConsoleIn:     os.Stdin,
+		ConsoleOut:    os.Stdout,
 	})
 	if err != nil {
 		return err
@@ -194,6 +203,7 @@ type vmServer struct {
 	mu           sync.Mutex
 	ctx          context.Context
 	socketPath   string
+	configsPath  string
 	startedAt    time.Time
 	defaultStart map[string]any
 	vms          map[string]*vmController
@@ -263,6 +273,10 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		payload = map[string]any{}
 	}
 	logVM(uid, "start", "request payload keys=%v", sortedPayloadKeys(payload))
+	if err := normalizeBaseDiskPayload(uid, payload); err != nil {
+		logVM(uid, "start", "base disk normalization failed: %v", err)
+		return "", err
+	}
 
 	s.mu.Lock()
 	if _, ok := s.vms[uid]; ok {
@@ -289,7 +303,8 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		kernel:         asString(payload, "kernel", "bzImage"),
 		initrd:         asString(payload, "initrd", ""),
 		iso:            asString(payload, "iso", ""),
-		cmdline:        asString(payload, "cmdline", "console=hvc0 reboot=t"),
+		cmdline:        asString(payload, "cmdline", "console=hvc0 root=/dev/vda reboot=t"),
+		serialConsole:  asBool(payload, "serial_console", false),
 		tap:            asString(payload, "tap", ""),
 		nat:            asBool(payload, "nat", false),
 		vhost:          asBool(payload, "vhost", false),
@@ -304,22 +319,23 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	payload["uid"] = uid
 	logVM(uid, "start", "building VM configuration")
 	cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
-		UID:          uid,
-		FirmwarePath: asString(payload, "firmware", ""),
-		KernelPath:   asString(payload, "kernel", "bzImage"),
-		InitrdPath:   asString(payload, "initrd", ""),
-		BlockSpecs:   asStringSlice(payload, "block"),
-		ISOPath:      asString(payload, "iso", ""),
-		Cmdline:      asString(payload, "cmdline", "console=hvc0 reboot=t"),
-		MemMiB:       asInt(payload, "mem", 1024),
-		NumCPU:       asInt(payload, "cpu", 1),
-		TapName:      asString(payload, "tap", ""),
-		NATMode:      asBool(payload, "nat", false),
-		VhostNet:     asBool(payload, "vhost", false),
-		VSOCKCID:     uint64(asInt(payload, "vsock-cid", 0)),
-		VSOCKPort:    uint32(asInt(payload, "vsock", 0)),
-		ConsoleIn:    consoleSession,
-		ConsoleOut:   consoleSession,
+		UID:           uid,
+		FirmwarePath:  asString(payload, "firmware", ""),
+		KernelPath:    asString(payload, "kernel", "bzImage"),
+		InitrdPath:    asString(payload, "initrd", ""),
+		BlockSpecs:    asStringSlice(payload, "block"),
+		ISOPath:       asString(payload, "iso", ""),
+		Cmdline:       asString(payload, "cmdline", "console=hvc0 root=/dev/vda reboot=t"),
+		SerialConsole: asBool(payload, "serial_console", false),
+		MemMiB:        asInt(payload, "mem", 1024),
+		NumCPU:        asInt(payload, "cpu", 1),
+		TapName:       asString(payload, "tap", ""),
+		NATMode:       asBool(payload, "nat", false),
+		VhostNet:      asBool(payload, "vhost", false),
+		VSOCKCID:      uint64(asInt(payload, "vsock-cid", 0)),
+		VSOCKPort:     uint32(asInt(payload, "vsock", 0)),
+		ConsoleIn:     consoleSession,
+		ConsoleOut:    consoleSession,
 	})
 	if err != nil {
 		logVM(uid, "start", "config build failed: %v", err)
@@ -563,6 +579,7 @@ type vmController struct {
 	tap            string
 	nat            bool
 	vhost          bool
+	serialConsole  bool
 	natSubnet      string
 	natGateway     string
 	natGuestIP     string
@@ -876,28 +893,186 @@ func (s *vmServer) daemonStats() daemonStats {
 	}
 }
 
+func (s *vmServer) loadSavedConfigs() []map[string]any {
+	if s.configsPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(s.configsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "kube-vm: config store read failed: %v\n", err)
+		return nil
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(data, &items); err != nil {
+		fmt.Fprintf(os.Stderr, "kube-vm: config store parse failed: %v\n", err)
+		return nil
+	}
+	return items
+}
+
+func (s *vmServer) storeSavedConfigs(items []map[string]any) error {
+	if s.configsPath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.configsPath), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(items, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config store: %w", err)
+	}
+	if err := os.WriteFile(s.configsPath, data, 0o644); err != nil {
+		return fmt.Errorf("write config store: %w", err)
+	}
+	return nil
+}
+
+func (s *vmServer) listBaseDisks() []string {
+	disks, err := vmconfig.ListBaseDisks(vmconfig.DefaultBaseDiskDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kube-vm: list base disks: %v\n", err)
+		return nil
+	}
+	return disks
+}
+
+func normalizeBaseDiskPayload(uid string, payload map[string]any) error {
+	if payload == nil {
+		return nil
+	}
+	if uid == "" {
+		return nil
+	}
+	if baseDisk := strings.TrimSpace(asString(payload, "base_disk", "")); baseDisk != "" {
+		spec, err := vmconfig.EncodeBaseDiskCOWSpec(baseDisk, uid)
+		if err != nil {
+			return fmt.Errorf("prepare base disk %q: %w", baseDisk, err)
+		}
+		blocks := asStringSlice(payload, "block")
+		blocks = append(blocks, spec)
+		payload["block"] = blocks
+		delete(payload, "base_disk")
+	}
+	blocks := asStringSlice(payload, "block")
+	if len(blocks) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		candidate := strings.TrimSpace(block)
+		if candidate == "" {
+			continue
+		}
+		baseCandidate := strings.TrimSuffix(candidate, ":ro")
+		if resolved, err := vmconfig.ResolveBaseDisk(baseCandidate); err == nil && resolved != "" {
+			spec, err := vmconfig.EncodeBaseDiskCOWSpec(resolved, uid)
+			if err != nil {
+				return fmt.Errorf("prepare base disk %q: %w", candidate, err)
+			}
+			filtered = append(filtered, spec)
+			continue
+		}
+		filtered = append(filtered, block)
+	}
+	payload["block"] = filtered
+	return nil
+}
+
+func (s *vmServer) saveConfig(item map[string]any) (map[string]any, error) {
+	if item == nil {
+		return nil, fmt.Errorf("config payload is required")
+	}
+	name, _ := item["name"].(string)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("config name is required")
+	}
+	payload, ok := item["payload"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("config payload is required")
+	}
+	id := strings.TrimSpace(asString(item, "id", ""))
+	if id == "" {
+		id = fmt.Sprintf("saved-%d", time.Now().UnixNano())
+	}
+	newItem := map[string]any{
+		"id":         id,
+		"name":       name,
+		"payload":    payload,
+		"created_at": asString(item, "created_at", time.Now().UTC().Format(time.RFC3339)),
+		"updated_at": time.Now().UTC().Format(time.RFC3339),
+		"source":     "saved",
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := s.loadSavedConfigs()
+	updated := false
+	for i, cfg := range items {
+		if cfg["id"] == id {
+			items[i] = newItem
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		items = append(items, newItem)
+	}
+	if err := s.storeSavedConfigs(items); err != nil {
+		return nil, err
+	}
+	return newItem, nil
+}
+
+func (s *vmServer) deleteConfig(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := s.loadSavedConfigs()
+	filtered := make([]map[string]any, 0, len(items))
+	for _, cfg := range items {
+		if asString(cfg, "id", "") != id {
+			filtered = append(filtered, cfg)
+		}
+	}
+	return s.storeSavedConfigs(filtered)
+}
+
 func (s *vmServer) defaultConfigs() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.defaultStart) == 0 {
-		return nil
-	}
-	payload := make(map[string]any, len(s.defaultStart))
-	for k, v := range s.defaultStart {
-		if blocks, ok := v.([]string); ok {
-			cp := make([]string, len(blocks))
-			copy(cp, blocks)
-			payload[k] = cp
-			continue
+	configs := make([]map[string]any, 0, 4)
+	if len(s.defaultStart) > 0 {
+		payload := make(map[string]any, len(s.defaultStart))
+		for k, v := range s.defaultStart {
+			if blocks, ok := v.([]string); ok {
+				cp := make([]string, len(blocks))
+				copy(cp, blocks)
+				payload[k] = cp
+				continue
+			}
+			payload[k] = v
 		}
-		payload[k] = v
+		configs = append(configs, map[string]any{
+			"id":      "global-default",
+			"name":    "Global Default",
+			"source":  "global",
+			"payload": payload,
+		})
 	}
-	return []map[string]any{{
-		"id":      "global-default",
-		"name":    "Global Default",
-		"source":  "global",
-		"payload": payload,
-	}}
+	for _, cfg := range s.loadSavedConfigs() {
+		configs = append(configs, cfg)
+	}
+	return configs
 }
 
 func (s *vmServer) defaultStartPayload() map[string]any {
@@ -1021,12 +1196,20 @@ func asStringSlice(payload map[string]any, key string) []string {
 		return nil
 	}
 
+	appendSplit := func(out []string, raw string) []string {
+		for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == ',' }) {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	}
+
 	if ss, ok := v.([]string); ok {
 		out := make([]string, 0, len(ss))
 		for _, s := range ss {
-			if s != "" {
-				out = append(out, s)
-			}
+			out = appendSplit(out, s)
 		}
 		return out
 	}
@@ -1035,16 +1218,16 @@ func asStringSlice(payload map[string]any, key string) []string {
 		out := make([]string, 0, len(aa))
 		for _, item := range aa {
 			s, ok := item.(string)
-			if !ok || s == "" {
+			if !ok || strings.TrimSpace(s) == "" {
 				continue
 			}
-			out = append(out, s)
+			out = appendSplit(out, s)
 		}
 		return out
 	}
 
-	if s, ok := v.(string); ok && s != "" {
-		return []string{s}
+	if s, ok := v.(string); ok {
+		return appendSplit(nil, s)
 	}
 
 	return nil

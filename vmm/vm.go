@@ -49,6 +49,11 @@ type Config struct {
 	// SnapshotConfig records launch metadata that should be embedded in snapshots.
 	SnapshotConfig SnapshotConfig
 
+	// SerialIn and SerialOut configure an optional COM1/ttyS0 serial console.
+	// When nil, no userspace serial device is attached.
+	SerialIn  io.Reader
+	SerialOut io.Writer
+
 	// Arch, if set, is called to do arch-specific setup during VM creation.
 	// If Arch is nil, a default implementation is used. Setting Arch is
 	// probably only useful for testing, debugging, and development.
@@ -96,11 +101,14 @@ type Arch interface {
 }
 
 type VM struct {
-	fd   *kvm.VM
-	mem  []byte
-	cpu  []*vcpu
-	mmio *mmio.Bus
-	irqf map[int]int // irq:fd
+	fd            *kvm.VM
+	mem           []byte
+	cpu           []*vcpu
+	mmio          *mmio.Bus
+	serial        *serialDevice
+	irqf          map[int]int // irq:fd
+	pciConfigMu   sync.Mutex
+	pciConfigAddr uint32
 
 	snapshotConfig SnapshotConfig
 
@@ -143,19 +151,20 @@ const snapshotMagic = "kube-vm-snapshot-v1"
 
 // SnapshotConfig captures the launch metadata stored alongside VM state.
 type SnapshotConfig struct {
-	MemSize      int
-	NumCPU       int
-	FirmwarePath string
-	KernelPath   string
-	InitrdPath   string
-	ISOPath      string
-	Cmdline      string
-	TapName      string
-	NATMode      bool
-	VhostNet     bool
-	VSOCKCID     uint64
-	VSOCKPort    uint32
-	BlockSpecs   []string
+	MemSize       int
+	NumCPU        int
+	FirmwarePath  string
+	KernelPath    string
+	InitrdPath    string
+	ISOPath       string
+	Cmdline       string
+	TapName       string
+	NATMode       bool
+	VhostNet      bool
+	SerialConsole bool
+	VSOCKCID      uint64
+	VSOCKPort     uint32
+	BlockSpecs    []string
 }
 
 func (cfg SnapshotConfig) withVMDefaults(memSize, numCPU int) SnapshotConfig {
@@ -350,6 +359,9 @@ func New(cfg Config) (*VM, error) {
 		snapshotConfig: cfg.SnapshotConfig,
 	}
 	m.pauseCond = sync.NewCond(&m.pauseMu)
+	if cfg.SerialIn != nil || cfg.SerialOut != nil {
+		m.serial = newSerialDevice(cfg.SerialIn, cfg.SerialOut)
+	}
 
 	m.mmio, err = mmio.NewBus(cfg.Devices, mmio.Config{
 		MemAt: func(addr uint64, len int) ([]byte, error) {
@@ -517,6 +529,15 @@ func (m *VM) Run(ctx context.Context) error {
 
 			switch state.ExitReason {
 			case kvm.ExitIO:
+				xd := state.IOExitData()
+				dataStart := int(xd.Offset)
+				dataLen := int(xd.Size) * int(xd.Count)
+				if dataStart < 0 || dataLen < 0 || dataStart+dataLen > len(c.mm) {
+					return fmt.Errorf("vcpu io: invalid data window offset=%d len=%d", dataStart, dataLen)
+				}
+				if err := m.handleIO(xd, c.mm[dataStart:dataStart+dataLen]); err != nil {
+					return fmt.Errorf("vcpu io: %w", err)
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -543,6 +564,9 @@ func (m *VM) Run(ctx context.Context) error {
 				xd := state.MMIOExitData()
 				if _, err := m.mmio.HandleMMIO(xd.PhysAddr, xd.Data[:xd.Len], xd.IsWrite); err != nil {
 					return fmt.Errorf("vcpu mmio: %w", err)
+				}
+				if err := ctx.Err(); err != nil {
+					return err
 				}
 				if err := ctx.Err(); err != nil {
 					return err
@@ -716,6 +740,16 @@ func (m *VM) Close() error {
 				hasErr = true
 			}
 		}
+	}
+
+	if m.serial != nil {
+		if err := m.serial.Close(); err != nil {
+			if !hasErr {
+				firstErr = fmt.Errorf("close serial: %w", err)
+				hasErr = true
+			}
+		}
+		m.serial = nil
 	}
 
 	if m.mem != nil {

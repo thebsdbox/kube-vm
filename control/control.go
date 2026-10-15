@@ -195,11 +195,16 @@ func handleConn(conn net.Conn, handler Handler) {
 
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+		fmt.Fprintf(os.Stderr, "kube-vm: control: invalid request from %s: %v\n", conn.RemoteAddr(), err)
 		_ = sendResponse(conn, Response{OK: false, Error: "invalid request"})
 		return
 	}
 
-	_ = sendResponse(conn, handleRequest(req, handler))
+	resp := handleRequest(req, handler)
+	if !resp.OK && resp.Error != "" {
+		fmt.Fprintf(os.Stderr, "kube-vm: control: action=%q uid=%q failed: %s\n", req.Action, uidFromPayload(req.Payload), resp.Error)
+	}
+	_ = sendResponse(conn, resp)
 }
 
 func handleRequest(req Request, handler Handler) Response {
@@ -313,7 +318,8 @@ type ConsoleSession struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
 	writeMu sync.Mutex
-	conn    net.Conn
+	conns   []net.Conn
+	active  net.Conn
 	closed  bool
 	dropped bool
 	onClose func()
@@ -336,31 +342,19 @@ func (s *ConsoleSession) SetConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	oldConn := s.conn
-	if s.conn != nil {
-		fmt.Fprintf(os.Stderr, "kube-vm: console session: replacing existing client %s with %s\n", s.conn.RemoteAddr(), conn.RemoteAddr())
-	} else {
-		fmt.Fprintf(os.Stderr, "kube-vm: console session: client attached %s\n", conn.RemoteAddr())
-	}
-	s.conn = conn
+	s.conns = append(s.conns, conn)
+	s.active = conn
 	s.dropped = false
 	history := s.history.snapshot()
 	s.cond.Broadcast()
 	s.mu.Unlock()
 
-	if oldConn != nil {
-		_ = oldConn.Close()
-	}
+	fmt.Fprintf(os.Stderr, "kube-vm: console session: client attached %s\n", conn.RemoteAddr())
 	if len(history) == 0 {
 		return
 	}
 	if _, err := writeAll(conn, history); err != nil && isConsoleConnError(err) {
-		s.mu.Lock()
-		if s.conn == conn {
-			s.conn = nil
-			s.dropped = false
-		}
-		s.mu.Unlock()
+		s.removeConn(conn)
 		fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while replaying history (%v); waiting for reattach\n", err)
 		_ = conn.Close()
 	}
@@ -382,11 +376,11 @@ func (s *ConsoleSession) Close() error {
 	}
 	s.closed = true
 	fmt.Fprintln(os.Stderr, "kube-vm: console session: closing")
-	if s.conn != nil {
-		c := s.conn
-		s.conn = nil
+	for _, c := range s.conns {
 		_ = c.Close()
 	}
+	s.conns = nil
+	s.active = nil
 	fn := s.onClose
 	s.onClose = nil
 	s.cond.Broadcast()
@@ -401,24 +395,19 @@ func (s *ConsoleSession) Close() error {
 func (s *ConsoleSession) Read(p []byte) (int, error) {
 	for {
 		s.mu.Lock()
-		for !s.closed && s.conn == nil {
+		for !s.closed && s.active == nil {
 			s.cond.Wait()
 		}
-		if s.closed && s.conn == nil {
+		if s.closed && s.active == nil {
 			s.mu.Unlock()
 			return 0, io.EOF
 		}
-		conn := s.conn
+		conn := s.active
 		s.mu.Unlock()
 		if conn != nil {
 			n, err := conn.Read(p)
 			if err != nil && (errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)) {
-				s.mu.Lock()
-				if s.conn == conn {
-					s.conn = nil
-					s.dropped = false
-				}
-				s.mu.Unlock()
+				s.removeConn(conn)
 				fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while reading (%v); waiting for reattach\n", err)
 				continue
 			}
@@ -437,35 +426,52 @@ func (s *ConsoleSession) Write(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	s.history.append(p)
-	conn := s.conn
-	dropped := s.dropped
-
-	if conn == nil {
-		if !dropped {
-			if !s.closed && s.conn == nil && !s.dropped {
-				s.dropped = true
-				fmt.Fprintln(os.Stderr, "kube-vm: console session: no client attached; buffering console output until a client connects")
-			}
+	conns := append([]net.Conn(nil), s.conns...)
+	if len(conns) == 0 {
+		if !s.dropped {
+			s.dropped = true
+			fmt.Fprintln(os.Stderr, "kube-vm: console session: no client attached; buffering console output until a client connects")
 		}
 		s.mu.Unlock()
 		return len(p), nil
 	}
 	s.mu.Unlock()
 
-	n, err := writeAll(conn, p)
-	if err != nil && isConsoleConnError(err) {
-		s.mu.Lock()
-		if s.conn == conn {
-			s.conn = nil
-			s.dropped = false
+	failed := make([]net.Conn, 0)
+	for _, conn := range conns {
+		if _, err := writeAll(conn, p); err != nil {
+			if isConsoleConnError(err) {
+				failed = append(failed, conn)
+				continue
+			}
+			return len(p), err
 		}
-		s.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while writing (%v); waiting for reattach\n", err)
-		// Treat disconnect as non-fatal; allow future reattach.
-		return len(p), nil
 	}
+	for _, conn := range failed {
+		s.removeConn(conn)
+		_ = conn.Close()
+		fmt.Fprintf(os.Stderr, "kube-vm: console session: client disconnected while writing; waiting for reattach\n")
+	}
+	return len(p), nil
+}
 
-	return n, err
+func (s *ConsoleSession) removeConn(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.conns[:0]
+	for _, current := range s.conns {
+		if current != conn {
+			filtered = append(filtered, current)
+		}
+	}
+	s.conns = filtered
+	if s.active == conn {
+		s.active = nil
+	}
+	if len(s.conns) == 0 {
+		s.dropped = false
+	}
+	s.cond.Broadcast()
 }
 
 func isConsoleConnError(err error) bool {

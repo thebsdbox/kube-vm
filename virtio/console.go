@@ -109,7 +109,7 @@ func (h *consoleHandler) handleRx(q *virtq.Queue) error {
 				return gbe
 			}
 
-			n, err = h.cfg.In.Read(buf)
+			n, err = h.readConsoleInput(buf)
 			break
 		}
 
@@ -123,6 +123,13 @@ func (h *consoleHandler) handleRx(q *virtq.Queue) error {
 	}
 
 	return nil
+}
+
+func (h *consoleHandler) readConsoleInput(buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	return h.cfg.In.Read(buf)
 }
 
 func (h *consoleHandler) handleTx(q *virtq.Queue) error {

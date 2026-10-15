@@ -9,7 +9,6 @@ const frontendHTML = `<!doctype html>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
-	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css" />
   <style>
 		html { font-size: 125%; }
     :root {
@@ -60,15 +59,29 @@ const frontendHTML = `<!doctype html>
     .v { font-size: 1.05rem; font-weight: 700; font-family: "IBM Plex Mono", monospace; }
     .panel { overflow: hidden; }
     .panel h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 1rem; }
+	.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+	.panel-head h2 { padding: 0; border-bottom: 0; }
     .content { padding: 14px; }
     .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .compact-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
     label { display: block; font-size: 0.82rem; color: var(--muted); margin-bottom: 4px; }
-    input, textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; background: #fff; }
+	input, textarea, select { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; background: #fff; }
+    .compact-grid input, .compact-grid textarea { padding: 7px 8px; }
+	.compact-grid select { padding: 7px 8px; }
+	.base-disk-field { grid-column: span 2; min-width: min(100%, 20rem); }
+	.base-disk-field select { min-width: 0; }
     textarea { min-height: 72px; resize: vertical; }
+    .advanced-wrap { margin-top: 12px; }
+    .advanced-toggle { display: inline-flex; align-items: center; gap: 6px; }
+    .advanced { display: none; margin-top: 10px; }
+    .advanced.open { display: block; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     button { border: 0; border-radius: 10px; padding: 9px 13px; font: 600 0.92rem "Sora", sans-serif; cursor: pointer; transition: transform 120ms ease, opacity 120ms ease; }
     button:hover { transform: translateY(-1px); }
     .primary { background: var(--accent); color: #fff; }
+	.toggle-on { background: var(--accent); color: #fff; }
+	.toggle-off { background: #ece2d2; color: #263428; }
     .warn { background: var(--accent-2); color: #fff; }
     .ghost { background: #ece2d2; color: #263428; }
     .status { min-height: 1.2em; color: var(--muted); font-size: 0.9rem; margin-top: 8px; }
@@ -87,7 +100,7 @@ const frontendHTML = `<!doctype html>
 		.two { display: grid; gap: 14px; grid-template-columns: 1fr; }
 		.head-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 		@media (max-width: 920px) { .two { grid-template-columns: 1fr; } }
-    @media (max-width: 760px) { body { padding: 14px; } th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8) { display: none; } }
+	@media (max-width: 760px) { body { padding: 14px; } .base-disk-field { grid-column: span 1; min-width: 0; } th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8) { display: none; } }
   </style>
 </head>
 <body>
@@ -102,43 +115,64 @@ const frontendHTML = `<!doctype html>
 
     <section class="panel"><h2>API auth token</h2><div class="content"><label>Bearer token (optional)</label><input id="token" placeholder="matches -web-token" /><div class="status">Stored in your browser local storage for this page origin.</div></div></section>
 
-    <section class="cards" id="cards"></section>
+		<section class="panel">
+			<h2>Server Statistics</h2>
+			<div class="content">
+				<section class="cards" id="cards"></section>
+			</div>
+		</section>
 
     <section class="panel">
       <h2>Start VM</h2>
       <div class="content">
         <form id="start-form">
-          <div class="grid">
-            <div><label>UID (optional)</label><input name="uid" /></div>
-            <div><label>Memory MiB</label><input name="mem" value="1024" /></div>
-            <div><label>VCPUs</label><input name="cpu" value="1" /></div>
-            <div><label>Kernel</label><input name="kernel" value="bzImage" /></div>
-            <div><label>Initrd</label><input name="initrd" value="initramfs.cpio.gz" /></div>
-            <div><label>Firmware</label><input name="firmware" /></div>
-            <div><label>ISO</label><input name="iso" /></div>
-            <div><label>TAP</label><input name="tap" /></div>
-					<div style="display:flex; align-items:center; gap:8px; margin-top:18px;">
-						<input id="start-nat" name="nat" type="checkbox" style="width:auto;" />
-						<label for="start-nat" style="margin:0;">Enable NAT networking</label>
-					</div>
-					<div style="display:flex; align-items:center; gap:8px; margin-top:18px;">
-						<input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" />
-						<label for="start-vhost" style="margin:0;">Request vhost-net acceleration</label>
-					</div>
+          <div class="grid compact-grid">
+            <div class="field"><label>UID</label><input name="uid" placeholder="optional" /></div>
+            <div class="field"><label>Mem</label><input name="mem" value="1024" /></div>
+            <div class="field"><label>VCPUs</label><input name="cpu" value="1" /></div>
+            <div class="field"><label>Kernel</label><input name="kernel" value="bzImage" /></div>
+            <div class="field"><label>Initrd</label><input name="initrd" value="initramfs.cpio.gz" /></div>
+            <div class="field"><label>Firmware</label><input name="firmware" /></div>
+            <div class="field"><label>ISO</label><input name="iso" /></div>
+			<div class="field base-disk-field"><label>Base disk</label><select name="base_disk" id="base-disk"><option value="">none</option></select></div>
+            <div class="field"><label>TAP</label><input name="tap" /></div>
+            <div class="field" style="justify-content: end;">
+              <label>&nbsp;</label>
+              <label style="display:flex; align-items:center; gap:8px; margin:0;">
+                <input id="start-nat" name="nat" type="checkbox" style="width:auto;" />
+                <span>NAT</span>
+              </label>
+            </div>
+            <div class="field" style="justify-content: end;">
+              <label>&nbsp;</label>
+              <label style="display:flex; align-items:center; gap:8px; margin:0;">
+                <input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" />
+                <span>vhost</span>
+              </label>
+            </div>
           </div>
 					<div class="status">NAT and TAP are mutually exclusive. vhost-net requires TAP and is currently rejected if requested.</div>
-          <div style="margin-top:10px"><label>Cmdline</label><input name="cmdline" value="console=hvc0 reboot=t" /></div>
-          <div style="margin-top:10px"><label>Snapshot path (optional; restore this snapshot before booting the VM)</label><input name="snapshot" placeholder="/tmp/kube-vm/vm.snap" /></div>
-	          <div class="grid" style="margin-top:10px;">
-	            <div><label>CoW base disk (optional)</label><input name="cow_base" placeholder="/var/lib/kube-vm/base.img" /></div>
-	            <div><label>CoW overlay file (optional)</label><input name="cow_overlay" placeholder="/var/lib/kube-vm/vm.overlay" /></div>
-	          </div>
-	          <div class="status">If both CoW fields are set, kube-vm will attach a writable copy-on-write disk backed by the base image and overlay file.</div>
-          <div style="margin-top:10px"><label>Block devices (comma or newline separated)</label><textarea name="block"></textarea></div>
+					<div class="advanced-wrap">
+					  <button class="ghost advanced-toggle" id="advanced-toggle" type="button" aria-expanded="false">Show advanced</button>
+					</div>
+          <div id="advanced-start-fields" class="advanced">
+            <div class="grid compact-grid" style="margin-top:8px;">
+			  <div class="field" style="grid-column: 1 / -1;"><label>Cmdline</label><input name="cmdline" value="console=hvc0 root=/dev/vda reboot=t" /></div>
+              <div class="field"><label>Snapshot</label><input name="snapshot" placeholder="/tmp/kube-vm/vm.snap" /></div>
+              <div class="field"><label>CoW base</label><input name="cow_base" placeholder="/var/lib/kube-vm/base.img" /></div>
+              <div class="field"><label>CoW overlay</label><input name="cow_overlay" placeholder="/var/lib/kube-vm/vm.overlay" /></div>
+            </div>
+					<div style="margin-top:10px; display:flex; align-items:center; gap:8px;">
+				<input id="start-serial-console" name="serial_console" type="checkbox" style="width:auto;" />
+				<label for="start-serial-console" style="margin:0;">Serial console (ttyS0)</label>
+			</div>
+            <div class="status">If both CoW fields are set, kube-vm will attach a writable copy-on-write disk backed by the base image and overlay file.</div>
+            <div style="margin-top:10px"><label>Block devices (comma or newline separated)</label><textarea name="block"></textarea></div>
 					<div style="margin-top:10px; display:flex; align-items:center; gap:8px;">
 						<input id="start-connect" type="checkbox" checked style="width:auto;" />
 						<label for="start-connect" style="margin:0;">Auto-connect web console after VM start</label>
 					</div>
+          </div>
           <div class="actions"><button class="primary" type="submit">Start VM</button><button class="ghost" type="button" id="refresh">Refresh</button></div>
           <div class="status" id="status"></div>
         </form>
@@ -146,7 +180,10 @@ const frontendHTML = `<!doctype html>
     </section>
 
 		<section class="panel">
-			<h2>Saved VM Configurations</h2>
+			<div class="panel-head">
+				<h2>Saved VM Configurations</h2>
+				<button class="ghost" id="config-toggle" type="button">Hide Saved Configurations</button>
+			</div>
 			<div class="content">
 				<div class="grid">
 					<div>
@@ -159,7 +196,7 @@ const frontendHTML = `<!doctype html>
 					<button class="ghost" id="config-clear-recent" type="button">Clear Recent</button>
 				</div>
 				<div class="status" id="config-status"></div>
-				<div style="margin-top:10px; overflow:auto;">
+				<div id="saved-config-list" style="margin-top:10px; overflow:auto;">
 					<table>
 						<thead><tr><th>Name</th><th>Type</th><th>Summary</th><th>Saved</th><th>Actions</th></tr></thead>
 						<tbody id="config-rows"></tbody>
@@ -187,7 +224,14 @@ const frontendHTML = `<!doctype html>
 				</div>
         <div>
           <label>VM UID</label><input id="console-uid" />
-          <div class="actions"><button class="primary" id="console-open" type="button">Open Console</button><button class="ghost" id="console-open-window" type="button">Open in New Window</button><button class="ghost" id="console-close" type="button">Close</button></div>
+		  <div class="actions"><button class="primary" id="console-open" type="button">Open Console</button><button class="ghost" id="console-open-window" type="button">Open Shared Window</button><button class="ghost" id="console-copy-link" type="button">Copy Share Link</button><button class="ghost" id="console-close" type="button">Close</button></div>
+		  <div style="margin-top:10px;">
+			<label for="console-share-mode">Shared window mode</label>
+			<select id="console-share-mode">
+				<option value="rw">Read-write</option>
+				<option value="ro">Read-only</option>
+			</select>
+		  </div>
 					<div id="console-fallback-controls" style="display:none; margin-top:8px;">
 						<label>Fallback input</label>
 						<textarea id="console-fallback-input" placeholder="Type input for guest console"></textarea>
@@ -199,8 +243,6 @@ const frontendHTML = `<!doctype html>
     </section>
   </main>
 
-	<script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js"></script>
-	<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script>
     const cards = document.getElementById('cards');
     const rows = document.getElementById('vm-rows');
@@ -211,6 +253,7 @@ const frontendHTML = `<!doctype html>
 	const themeToggleEl = document.getElementById('theme-toggle');
 	const natModeEl = document.getElementById('start-nat');
 	const vhostNetEl = document.getElementById('start-vhost');
+	const serialConsoleEl = document.getElementById('start-serial-console');
 	const tapInputEl = document.querySelector('input[name="tap"]');
 	const cmdlineInputEl = document.querySelector('input[name="cmdline"]');
 	const configNameEl = document.getElementById('config-name');
@@ -218,23 +261,32 @@ const frontendHTML = `<!doctype html>
 	const configStatusEl = document.getElementById('config-status');
 	const configSaveEl = document.getElementById('config-save');
 	const configClearRecentEl = document.getElementById('config-clear-recent');
+	const configToggleEl = document.getElementById('config-toggle');
+	const configPanelContentEl = document.getElementById('saved-config-list');
+	const baseDiskSelectEl = document.getElementById('base-disk');
+	const advancedToggleEl = document.getElementById('advanced-toggle');
+	const advancedFieldsEl = document.getElementById('advanced-start-fields');
 	const consoleTermEl = document.getElementById('console-terminal');
 	const consoleHint = document.getElementById('console-hint');
     const consoleUID = document.getElementById('console-uid');
     const consoleStatus = document.getElementById('console-status');
+	const consoleShareModeEl = document.getElementById('console-share-mode');
 	const fallbackControls = document.getElementById('console-fallback-controls');
 	const fallbackInput = document.getElementById('console-fallback-input');
 
     let consoleSessionID = '';
     let consolePollTimer = null;
+	let consoleOffset = 0;
+	let consoleReadOnly = false;
+	let consoleShared = false;
 	let term = null;
-	let fitAddon = null;
 	let inputBuffer = '';
 	let inputFlushTimer = null;
 	let fallbackMode = false;
 	let consoleDecoder = createConsoleDecoder();
 	const savedConfigKey = 'kubevm_web_saved_configs_v1';
 	const recentConfigKey = 'kubevm_web_recent_configs_v1';
+	const savedConfigVisibilityKey = 'kubevm_web_saved_configs_visible_v1';
 	let refreshNetworkModeUI = function() {};
 	let skipRememberRecentOnce = false;
 
@@ -268,6 +320,30 @@ const frontendHTML = `<!doctype html>
 			natModeEl.addEventListener('change', refreshNetworkModeUI);
 			refreshNetworkModeUI();
 		}
+		if (serialConsoleEl && cmdlineInputEl) {
+			serialConsoleEl.addEventListener('change', function() {
+				const virtioDefault = 'console=hvc0 root=/dev/vda reboot=t';
+				const serialDefault = 'console=ttyS0 root=/dev/vda reboot=t';
+				if (serialConsoleEl.checked && cmdlineInputEl.value.trim() === virtioDefault) {
+					cmdlineInputEl.value = serialDefault;
+				} else if (!serialConsoleEl.checked && cmdlineInputEl.value.trim() === serialDefault) {
+					cmdlineInputEl.value = virtioDefault;
+				}
+			});
+		}
+
+		function toggleAdvancedFields() {
+			if (!advancedFieldsEl || !advancedToggleEl) {
+				return;
+			}
+			const open = advancedFieldsEl.classList.toggle('open');
+			advancedToggleEl.textContent = open ? 'Hide advanced' : 'Show advanced';
+			advancedToggleEl.setAttribute('aria-expanded', String(open));
+		}
+
+		if (advancedToggleEl && advancedFieldsEl) {
+			advancedToggleEl.addEventListener('click', toggleAdvancedFields);
+		}
 
 		function nowISO() {
 			return new Date().toISOString();
@@ -282,12 +358,48 @@ const frontendHTML = `<!doctype html>
 			}
 		}
 
+		async function refreshBaseDiskOptions() {
+			if (!baseDiskSelectEl) return;
+			try {
+				const body = await api('/api/v1/disks/base');
+				const disks = Array.isArray(body && body.disks) ? body.disks : [];
+				const current = baseDiskSelectEl.value;
+				baseDiskSelectEl.innerHTML = '<option value="">none</option>' + disks.map(function(path) {
+					const label = String(path || '').replace(/^.*\/base-disks\//, '');
+					return '<option value="' + path + '">' + label + '</option>';
+				}).join('');
+				if (disks.includes(current)) {
+					baseDiskSelectEl.value = current;
+				}
+			} catch (_) {
+				baseDiskSelectEl.innerHTML = '<option value="">none</option>';
+			}
+		}
+
 		function loadSavedConfigs() {
-			return safeParseJSON(localStorage.getItem(savedConfigKey) || '[]', []);
+			if (!window.__kubevmGlobalConfigs || !Array.isArray(window.__kubevmGlobalConfigs)) {
+				return [];
+			}
+			return window.__kubevmGlobalConfigs.filter(function(item) {
+				return !!item && (item.source === 'saved' || item.source === 'global');
+			});
 		}
 
 		function saveSavedConfigs(items) {
-			localStorage.setItem(savedConfigKey, JSON.stringify(items || []));
+			return items || [];
+		}
+
+		async function saveConfigToServer(cfg, name, id) {
+			const body = await api('/api/v1/configs/global', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: id || '', name: name, payload: cfg })
+			});
+			return body && body.config ? body.config : null;
+		}
+
+		async function deleteConfigFromServer(id) {
+			await api('/api/v1/configs/global?id=' + encodeURIComponent(id), { method: 'DELETE' });
 		}
 
 		function loadRecentConfigs() {
@@ -308,6 +420,8 @@ const frontendHTML = `<!doctype html>
 				initrd: String(cfg.initrd || '').trim(),
 				firmware: String(cfg.firmware || '').trim(),
 				iso: String(cfg.iso || '').trim(),
+				serial_console: !!cfg.serial_console,
+				base_disk: String(cfg.base_disk || '').trim(),
 				tap: String(cfg.tap || '').trim(),
 				nat: !!cfg.nat,
 				vhost: !!cfg.vhost,
@@ -385,6 +499,8 @@ const frontendHTML = `<!doctype html>
 				initrd: fd.get('initrd'),
 				firmware: fd.get('firmware'),
 				iso: fd.get('iso'),
+				serial_console: !!(serialConsoleEl && serialConsoleEl.checked),
+				base_disk: fd.get('base_disk'),
 				tap: fd.get('tap'),
 				nat: !!(natModeEl && natModeEl.checked),
 				vhost: !!(vhostNetEl && vhostNetEl.checked),
@@ -400,7 +516,7 @@ const frontendHTML = `<!doctype html>
 			if (!startFormEl || !cfg) {
 				return;
 			}
-			const fields = ['uid', 'mem', 'cpu', 'kernel', 'initrd', 'firmware', 'iso', 'tap', 'snapshot', 'cow_base', 'cow_overlay', 'cmdline', 'block'];
+			const fields = ['uid', 'mem', 'cpu', 'kernel', 'initrd', 'firmware', 'iso', 'base_disk', 'tap', 'snapshot', 'cow_base', 'cow_overlay', 'cmdline', 'block'];
 			for (const key of fields) {
 				const el = startFormEl.elements.namedItem(key);
 				if (el && typeof el.value !== 'undefined') {
@@ -413,15 +529,20 @@ const frontendHTML = `<!doctype html>
 			if (vhostNetEl) {
 				vhostNetEl.checked = !!cfg.vhost;
 			}
+			if (serialConsoleEl) {
+				serialConsoleEl.checked = !!cfg.serial_console;
+			}
 			refreshNetworkModeUI();
 		}
 
 		function configSummary(cfg) {
 			const network = cfg.nat ? 'nat' : (cfg.tap ? 'tap:' + cfg.tap + (cfg.vhost ? ' vhost' : '') : 'none');
+			const baseDisk = cfg.base_disk ? ', base ' + String(cfg.base_disk).replace(/^.*\/base-disks\//, '') : '';
+			const serialMode = cfg.serial_console ? ', ttyS0' : '';
 			const storage = cfg.cow_base && cfg.cow_overlay
 				? ', cow ' + cfg.cow_base + ' -> ' + cfg.cow_overlay
 				: (cfg.block ? ', block ' + String(cfg.block).split(/\n|,/).filter(Boolean).length : '');
-			return 'mem ' + (cfg.mem || 'n/a') + ' MiB, cpu ' + (cfg.cpu || 'n/a') + ', ' + network + ', kernel ' + (cfg.kernel || 'n/a') + storage;
+			return 'mem ' + (cfg.mem || 'n/a') + ' MiB, cpu ' + (cfg.cpu || 'n/a') + ', ' + network + ', kernel ' + (cfg.kernel || 'n/a') + baseDisk + storage + serialMode;
 		}
 
 		function newConfigID() {
@@ -445,15 +566,10 @@ const frontendHTML = `<!doctype html>
 			const recent = loadRecentConfigs();
 			const rows = [];
 			for (const item of saved) {
-				rows.push({ source: 'saved', item: item });
+				rows.push({ source: item && item.source === 'global' ? 'global' : 'saved', item: item });
 			}
 			for (const item of recent) {
 				rows.push({ source: 'recent', item: item });
-			}
-			if (window.__kubevmGlobalConfigs && Array.isArray(window.__kubevmGlobalConfigs)) {
-				for (const item of window.__kubevmGlobalConfigs) {
-					rows.push({ source: 'global', item: { id: item.id || 'global-default', name: item.name || 'Global Default', payload: item.payload || {}, created_at: item.created_at || '', updated_at: item.updated_at || '' } });
-				}
 			}
 			rows.sort(function(a, b) {
 				const at = String(a.item.updated_at || a.item.created_at || '');
@@ -500,15 +616,22 @@ const frontendHTML = `<!doctype html>
 					}
 				});
 
-				tr.querySelector('button[data-delete]').addEventListener('click', function() {
-					if (rec.source === 'saved') {
-						saveSavedConfigs(loadSavedConfigs().filter(function(x) { return x.id !== rec.item.id; }));
-					} else {
-						saveRecentConfigs(loadRecentConfigs().filter(function(x) { return x.id !== rec.item.id; }));
-					}
-					renderConfigRows();
-					if (configStatusEl) {
-						configStatusEl.textContent = 'deleted config "' + (rec.item.name || 'unnamed') + '"';
+				tr.querySelector('button[data-delete]').addEventListener('click', async function() {
+					try {
+						if (rec.source === 'saved' || rec.source === 'global') {
+							await deleteConfigFromServer(rec.item.id);
+							await refreshGlobalConfigs();
+						} else {
+							saveRecentConfigs(loadRecentConfigs().filter(function(x) { return x.id !== rec.item.id; }));
+							renderConfigRows();
+						}
+						if (configStatusEl) {
+							configStatusEl.textContent = 'deleted config "' + (rec.item.name || 'unnamed') + '"';
+						}
+					} catch (err) {
+						if (configStatusEl) {
+							configStatusEl.textContent = 'delete failed: ' + String(err.message || err);
+						}
 					}
 				});
 
@@ -516,7 +639,20 @@ const frontendHTML = `<!doctype html>
 			}
 		}
 
-		function saveCurrentConfig() {
+	function setSavedConfigsVisible(visible) {
+		const isVisible = !!visible;
+		if (configPanelContentEl) {
+			configPanelContentEl.style.display = isVisible ? '' : 'none';
+		}
+		if (configToggleEl) {
+			configToggleEl.textContent = isVisible ? 'Hide Saved Configurations' : 'Show Saved Configurations';
+			configToggleEl.classList.toggle('toggle-on', isVisible);
+			configToggleEl.classList.toggle('toggle-off', !isVisible);
+		}
+		localStorage.setItem(savedConfigVisibilityKey, isVisible ? '1' : '0');
+	}
+
+		async function saveCurrentConfig() {
 			const cfg = collectFormConfig();
 			const name = String((configNameEl && configNameEl.value) || '').trim();
 			if (name === '') {
@@ -525,25 +661,19 @@ const frontendHTML = `<!doctype html>
 				}
 				return;
 			}
-			const now = nowISO();
-			const items = loadSavedConfigs();
-			const existing = items.find(function(x) { return String(x.name || '').toLowerCase() === name.toLowerCase(); });
-			if (existing) {
-				existing.payload = cfg;
-				existing.updated_at = now;
-			} else {
-				items.unshift({
-					id: newConfigID(),
-					name: name,
-					payload: cfg,
-					created_at: now,
-					updated_at: now
+			try {
+				const existing = loadSavedConfigs().find(function(x) {
+					return String(x.name || '').toLowerCase() === name.toLowerCase();
 				});
-			}
-			saveSavedConfigs(items.slice(0, 40));
-			renderConfigRows();
-			if (configStatusEl) {
-				configStatusEl.textContent = 'saved config "' + name + '"';
+				await saveConfigToServer(cfg, name, existing ? existing.id : '');
+				await refreshGlobalConfigs();
+				if (configStatusEl) {
+					configStatusEl.textContent = 'saved config "' + name + '"';
+				}
+			} catch (err) {
+				if (configStatusEl) {
+					configStatusEl.textContent = 'save failed: ' + String(err.message || err);
+				}
 			}
 		}
 
@@ -821,25 +951,9 @@ const frontendHTML = `<!doctype html>
 
 		function ensureTerminal() {
 			if (term) return;
-			const XTermCtor = window.Terminal || window.XTerm || createInlineTerminalCtor();
-			const FitCtor = (window.FitAddon && window.FitAddon.FitAddon) || createNoopFitAddonCtor();
-			if (!window.Terminal && !window.XTerm) {
-				consoleHint.textContent = 'Running built-in terminal mode (xterm CDN not available).';
-			}
-			term = new XTermCtor({
-				cursorBlink: true,
-				convertEol: true,
-				fontFamily: 'IBM Plex Mono, monospace',
-				fontSize: 13,
-				theme: {
-					background: '#101410',
-					foreground: '#ccf6cc',
-					cursor: '#f2f2f2',
-					selectionBackground: '#254425'
-				}
-			});
-			fitAddon = new FitCtor();
-			term.loadAddon(fitAddon);
+			const InlineTerminalCtor = createInlineTerminalCtor();
+			term = new InlineTerminalCtor();
+			consoleHint.textContent = 'Running built-in terminal mode.';
 			term.attachCustomKeyEventHandler(function(ev) {
 				if (ev.type !== 'keydown') {
 					return true;
@@ -887,7 +1001,9 @@ const frontendHTML = `<!doctype html>
 				return true;
 			});
 			term.open(consoleTermEl);
-			fitAddon.fit();
+			if (typeof term.fit === 'function') {
+				term.fit();
+			}
 			term.writeln('kube-vm web console ready.');
 			term.writeln('Use Open Console to attach.\\r\\n');
 			consoleTermEl.addEventListener('paste', function(ev) {
@@ -904,16 +1020,10 @@ const frontendHTML = `<!doctype html>
 				queueConsoleInput(data);
 			});
 			window.addEventListener('resize', function() {
-				if (fitAddon) {
-					fitAddon.fit();
+				if (term && typeof term.fit === 'function') {
+					term.fit();
 				}
 			});
-		}
-
-		function createNoopFitAddonCtor() {
-			return function NoopFitAddon() {
-				this.fit = function() {};
-			};
 		}
 
 		function createInlineTerminalCtor() {
@@ -928,6 +1038,9 @@ const frontendHTML = `<!doctype html>
 				if (addon && typeof addon.fit === 'function') {
 					addon.fit();
 				}
+			};
+
+			InlineTerminal.prototype.fit = function() {
 			};
 
 			InlineTerminal.prototype.attachCustomKeyEventHandler = function(fn) {
@@ -1177,6 +1290,9 @@ const frontendHTML = `<!doctype html>
 			if (!consoleSessionID) {
 				return;
 			}
+			if (consoleReadOnly) {
+				return;
+			}
 			inputBuffer += data;
 			if (inputFlushTimer) {
 				return;
@@ -1193,6 +1309,10 @@ const frontendHTML = `<!doctype html>
 			if (!consoleSessionID || inputBuffer === '') {
 				return;
 			}
+			if (consoleReadOnly) {
+				inputBuffer = '';
+				return;
+			}
 			const data = inputBuffer;
 			inputBuffer = '';
 			await api('/api/v1/console/input?id=' + encodeURIComponent(consoleSessionID), {
@@ -1205,9 +1325,12 @@ const frontendHTML = `<!doctype html>
 		async function pollConsole(sessionID) {
 			if (!sessionID || sessionID !== consoleSessionID) return;
       try {
-				const body = await api('/api/v1/console/poll?id=' + encodeURIComponent(sessionID));
+				const body = await api('/api/v1/console/poll?id=' + encodeURIComponent(sessionID) + '&offset=' + encodeURIComponent(String(consoleOffset || 0)));
 				if (sessionID !== consoleSessionID) {
 					return;
+				}
+        if (typeof body.offset === 'number' && Number.isFinite(body.offset) && body.offset >= 0) {
+					consoleOffset = body.offset;
 				}
         if (body.data_b64) {
 					const decoded = decodeConsoleChunk(body.data_b64);
@@ -1215,7 +1338,9 @@ const frontendHTML = `<!doctype html>
         }
         if (body.closed) {
           consoleStatus.textContent = 'console closed by backend';
-          consoleSessionID = '';
+					consoleSessionID = '';
+				resetConsoleSessionState();
+				setConsoleMode(false, false);
           return;
         }
       } catch (err) {
@@ -1231,18 +1356,75 @@ const frontendHTML = `<!doctype html>
       }
     }
 
-		function openConsoleWindow(uid) {
-			const target = uid || consoleUID.value.trim();
-			if (!target) {
-				throw new Error('console uid is required');
+		function buildConsoleShareUrl(mode) {
+			if (!consoleSessionID) {
+				throw new Error('open console first');
 			}
-			const url = new URL(window.location.href);
-			url.searchParams.set('console', target);
-			const popup = window.open(url.toString(), '_blank', 'width=980,height=680,resizable=yes,scrollbars=yes');
+			const url = new URL(window.location.origin + '/console');
+			url.searchParams.set('console_session', consoleSessionID);
+			url.searchParams.set('console_mode', mode === 'ro' ? 'ro' : 'rw');
+			const uid = consoleUID.value.trim();
+			if (uid) {
+				url.searchParams.set('console_uid', uid);
+			}
+			return url.toString();
+		}
+
+		function openConsoleWindow() {
+			if (!consoleSessionID) {
+				throw new Error('open console first');
+			}
+			const mode = consoleShareModeEl && consoleShareModeEl.value === 'ro' ? 'ro' : 'rw';
+			const shareUrl = buildConsoleShareUrl(mode);
+			copyTextToClipboard(shareUrl).catch(function() {});
+			const popup = window.open(shareUrl, '_blank', 'width=980,height=680,resizable=yes,scrollbars=yes');
 			if (!popup) {
 				throw new Error('popup blocked by the browser');
 			}
+			if (consoleStatus) {
+				consoleStatus.textContent = 'shared console URL copied and opened (' + mode + ')';
+			}
 			return popup;
+		}
+
+		async function copyConsoleShareLink() {
+			if (!consoleSessionID) {
+				throw new Error('open console first');
+			}
+			const mode = consoleShareModeEl && consoleShareModeEl.value === 'ro' ? 'ro' : 'rw';
+			const shareUrl = buildConsoleShareUrl(mode);
+			await copyTextToClipboard(shareUrl);
+			if (consoleStatus) {
+				consoleStatus.textContent = 'shared console URL copied (' + mode + ')';
+			}
+		}
+
+		async function copyTextToClipboard(text) {
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				await navigator.clipboard.writeText(text);
+				return true;
+			}
+			const ta = document.createElement('textarea');
+			ta.value = text;
+			ta.setAttribute('readonly', 'readonly');
+			ta.style.position = 'fixed';
+			ta.style.left = '-9999px';
+			ta.style.top = '0';
+			document.body.appendChild(ta);
+			ta.focus();
+			ta.select();
+			let copied = false;
+			try {
+				copied = document.execCommand && document.execCommand('copy');
+			} catch (_) {
+				copied = false;
+			}
+			ta.remove();
+			if (copied) {
+				return true;
+			}
+			window.prompt('Copy this shared console URL', text);
+			return false;
 		}
 
 		function revealConsole() {
@@ -1258,6 +1440,31 @@ const frontendHTML = `<!doctype html>
 			});
 		}
 
+		function setConsoleMode(isReadOnly, isShared) {
+			consoleReadOnly = !!isReadOnly;
+			consoleShared = !!isShared;
+			if (fallbackControls) {
+				fallbackControls.style.display = consoleReadOnly ? 'none' : '';
+			}
+			if (consoleShareModeEl && consoleShared) {
+				consoleShareModeEl.value = consoleReadOnly ? 'ro' : 'rw';
+			}
+		}
+
+		function resetConsoleSessionState() {
+			consoleOffset = 0;
+			inputBuffer = '';
+			resetConsoleDecoder();
+			if (inputFlushTimer) {
+				clearTimeout(inputFlushTimer);
+				inputFlushTimer = null;
+			}
+			if (consolePollTimer) {
+				clearTimeout(consolePollTimer);
+				consolePollTimer = null;
+			}
+		}
+
     async function openConsole() {
       const uid = consoleUID.value.trim();
       if (!uid) throw new Error('console uid is required');
@@ -1267,8 +1474,8 @@ const frontendHTML = `<!doctype html>
       }
       const body = await api('/api/v1/console/open?uid=' + encodeURIComponent(uid), { method: 'POST' });
       consoleSessionID = body.session_id;
-			inputBuffer = '';
-			resetConsoleDecoder();
+			resetConsoleSessionState();
+			setConsoleMode(false, false);
 			if (term) {
 				term.reset();
 				term.writeln('connected to ' + uid + '\\r\\n');
@@ -1276,8 +1483,8 @@ const frontendHTML = `<!doctype html>
 				consoleTermEl.textContent += 'connected to ' + uid + '\n\n';
 			}
       consoleStatus.textContent = 'console opened for ' + uid;
-			if (fitAddon) {
-				fitAddon.fit();
+			if (term && typeof term.fit === 'function') {
+				term.fit();
 			}
 			revealConsole();
 			if (term) {
@@ -1285,6 +1492,40 @@ const frontendHTML = `<!doctype html>
 			}
 			pollConsole(consoleSessionID);
     }
+
+		async function attachSharedConsole(sessionID, uid, mode) {
+			if (!sessionID) {
+				throw new Error('console session is required');
+			}
+			ensureTerminal();
+			if (consoleSessionID) {
+				await closeConsole();
+			}
+			consoleSessionID = sessionID;
+			resetConsoleSessionState();
+			setConsoleMode(mode === 'ro', true);
+			if (term) {
+				term.reset();
+				term.writeln('shared console connected' + (uid ? ' to ' + uid : '') + '\r\n');
+				if (consoleReadOnly) {
+					term.writeln('read-only view\r\n');
+				}
+			} else {
+				consoleTermEl.textContent += 'shared console connected' + (uid ? ' to ' + uid : '') + '\n';
+				if (consoleReadOnly) {
+					consoleTermEl.textContent += 'read-only view\n';
+				}
+			}
+			consoleStatus.textContent = 'shared console opened' + (consoleReadOnly ? ' (read-only)' : ' (read-write)');
+			if (term && typeof term.fit === 'function') {
+				term.fit();
+			}
+			revealConsole();
+			if (term) {
+				term.focus();
+			}
+			pollConsole(consoleSessionID);
+		}
 
 		async function openConsoleWithRetry(uid, attempts, delayMs) {
 			consoleUID.value = uid;
@@ -1310,6 +1551,7 @@ const frontendHTML = `<!doctype html>
 
 		async function sendFallbackInput() {
 			if (!consoleSessionID) throw new Error('open console first');
+			if (consoleReadOnly) throw new Error('shared console is read-only');
 			const text = fallbackInput.value;
 			if (!text) {
 				return;
@@ -1325,19 +1567,16 @@ const frontendHTML = `<!doctype html>
     async function closeConsole() {
       if (!consoleSessionID) return;
       const sid = consoleSessionID;
+			const wasShared = consoleShared;
       consoleSessionID = '';
-			inputBuffer = '';
-			resetConsoleDecoder();
-			if (inputFlushTimer) {
-				clearTimeout(inputFlushTimer);
-				inputFlushTimer = null;
+			resetConsoleSessionState();
+			setConsoleMode(false, false);
+			if (!wasShared) {
+				await api('/api/v1/console/close?id=' + encodeURIComponent(sid), { method: 'POST' });
+				consoleStatus.textContent = 'console closed';
+			} else {
+				consoleStatus.textContent = 'shared console closed locally';
 			}
-      if (consolePollTimer) {
-        clearTimeout(consolePollTimer);
-        consolePollTimer = null;
-      }
-      await api('/api/v1/console/close?id=' + encodeURIComponent(sid), { method: 'POST' });
-      consoleStatus.textContent = 'console closed';
 			if (term) {
 				term.writeln('\\r\\n[console closed]');
 			} else {
@@ -1397,19 +1636,37 @@ const frontendHTML = `<!doctype html>
       }
     });
 
-    document.getElementById('refresh').addEventListener('click', () => refresh().catch(err => statusEl.textContent = err.message));
-		document.getElementById('console-open').addEventListener('click', () => openConsole().catch(err => consoleStatus.textContent = err.message));
-		document.getElementById('console-open-window').addEventListener('click', () => openConsoleWindow().catch(err => consoleStatus.textContent = err.message));
-    document.getElementById('console-close').addEventListener('click', () => closeConsole().catch(err => consoleStatus.textContent = err.message));
-		document.getElementById('console-fallback-send').addEventListener('click', () => sendFallbackInput().catch(err => consoleStatus.textContent = err.message));
-		configSaveEl.addEventListener('click', saveCurrentConfig);
-		configClearRecentEl.addEventListener('click', () => {
-			saveRecentConfigs([]);
-			renderConfigRows();
-			if (configStatusEl) {
-				configStatusEl.textContent = 'cleared recent configuration history';
-			}
-		});
+const refreshBtn = document.getElementById('refresh');
+		const consoleOpenBtn = document.getElementById('console-open');
+		const consoleOpenWindowBtn = document.getElementById('console-open-window');
+		const consoleCopyLinkBtn = document.getElementById('console-copy-link');
+		const consoleCloseBtn = document.getElementById('console-close');
+		const consoleFallbackSendBtn = document.getElementById('console-fallback-send');
+		if (refreshBtn) refreshBtn.addEventListener('click', () => refresh().catch(err => statusEl.textContent = err.message));
+		if (consoleOpenBtn) consoleOpenBtn.addEventListener('click', () => openConsole().catch(err => consoleStatus.textContent = err.message));
+		if (consoleOpenWindowBtn) consoleOpenWindowBtn.addEventListener('click', () => openConsoleWindow().catch(err => consoleStatus.textContent = err.message));
+		if (consoleCopyLinkBtn) consoleCopyLinkBtn.addEventListener('click', () => copyConsoleShareLink().catch(err => consoleStatus.textContent = err.message));
+		if (consoleCloseBtn) consoleCloseBtn.addEventListener('click', () => closeConsole().catch(err => consoleStatus.textContent = err.message));
+		if (consoleFallbackSendBtn) consoleFallbackSendBtn.addEventListener('click', () => sendFallbackInput().catch(err => consoleStatus.textContent = err.message));
+		if (configSaveEl) {
+			configSaveEl.addEventListener('click', saveCurrentConfig);
+		}
+		if (configClearRecentEl) {
+			configClearRecentEl.addEventListener('click', () => {
+				saveRecentConfigs([]);
+				renderConfigRows();
+				if (configStatusEl) {
+					configStatusEl.textContent = 'cleared recent configuration history';
+				}
+			});
+		}
+		if (configToggleEl) {
+			configToggleEl.addEventListener('click', () => {
+				const currentlyVisible = !configPanelContentEl || configPanelContentEl.style.display !== 'none';
+				setSavedConfigsVisible(!currentlyVisible);
+			});
+			setSavedConfigsVisible(localStorage.getItem(savedConfigVisibilityKey) !== '0');
+		}
 
 		async function refreshGlobalConfigs() {
 			window.__kubevmGlobalConfigs = await loadGlobalConfigRows();
@@ -1418,13 +1675,20 @@ const frontendHTML = `<!doctype html>
 
 		initTheme();
 		ensureTerminal();
+		refreshBaseDiskOptions().catch(() => {});
 		refreshGlobalConfigs().catch(() => {});
 		renderConfigRows();
     refresh().catch(err => statusEl.textContent = err.message);
 		const urlParams = new URLSearchParams(window.location.search);
-		const autoConsoleUID = urlParams.get('console');
+		const autoConsoleSessionID = urlParams.get('console_session');
+		const autoConsoleMode = (urlParams.get('console_mode') || '').toLowerCase();
+		const autoConsoleUID = urlParams.get('console_uid') || urlParams.get('console');
 		if (autoConsoleUID) {
 			consoleUID.value = autoConsoleUID;
+		}
+		if (autoConsoleSessionID) {
+			attachSharedConsole(autoConsoleSessionID, autoConsoleUID, autoConsoleMode).catch(err => consoleStatus.textContent = err.message);
+		} else if (autoConsoleUID) {
 			openConsole().catch(err => consoleStatus.textContent = err.message);
 		}
     setInterval(() => refresh().catch(() => {}), 5000);

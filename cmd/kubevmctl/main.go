@@ -40,30 +40,32 @@ var sshPasswordPrompter = promptSSHPassword
 var sshCommandRunner = runSSHCommand
 
 type sshInvocation struct {
-	Host    string
-	User    string
-	Port    int
-	Command []string
+	Host          string
+	User          string
+	Port          int
+	Command       []string
 	IgnoreHostKey bool
 }
 
 var (
-	socketPath string
-	uid        string
-	detach     bool
-	firmware   string
-	kernel     string
-	initrd     string
-	iso        string
-	cmdline    string
-	memSize    int
-	numCPU     int
-	snapshot   string
-	tapName    string
-	natMode    bool
-	vhostNet   bool
-	blkdev     flagStrings
-	cowblk     flagStrings
+	socketPath    string
+	uid           string
+	detach        bool
+	firmware      string
+	kernel        string
+	initrd        string
+	iso           string
+	cmdline       string
+	serialConsole bool
+	memSize       int
+	numCPU        int
+	snapshot      string
+	tapName       string
+	baseDisk      string
+	natMode       bool
+	vhostNet      bool
+	blkdev        flagStrings
+	cowblk        flagStrings
 )
 
 func newRootCmd() *cobra.Command {
@@ -73,6 +75,7 @@ func newRootCmd() *cobra.Command {
 		Example: strings.TrimSpace(`
   kubevmctl list
   kubevmctl start --uid vm-123 --kernel bzImage --initrd initrd.cpio.gz
+  kubevmctl template save ubuntu --kernel bzImage --mem 4096
   kubevmctl pause --uid vm-123
   kubevmctl console --uid vm-123
 `),
@@ -94,6 +97,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newSaveCmd())
 	rootCmd.AddCommand(newRestoreCmd())
 	rootCmd.AddCommand(newSnapshotCmd())
+	rootCmd.AddCommand(newBaseDiskCmd())
+	rootCmd.AddCommand(newTemplateCmd())
 
 	return rootCmd
 }
@@ -155,6 +160,357 @@ func printSnapshotSummary(w io.Writer, path string, fileSize int64, snap *vmm.VM
 	for i, block := range cfg.BlockSpecs {
 		fmt.Fprintf(w, "block[%d]=%s\n", i, block)
 	}
+}
+
+func templateConfigPath(socketPath string) string {
+	if strings.TrimSpace(socketPath) == "" {
+		socketPath = defaultSocketPath()
+	}
+	return filepath.Join(filepath.Dir(socketPath), "saved-configs.json")
+}
+
+func loadSavedTemplates(socketPath string) ([]map[string]any, error) {
+	path := templateConfigPath(socketPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var out []map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func writeSavedTemplates(socketPath string, templates []map[string]any) error {
+	path := templateConfigPath(socketPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(templates, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func saveTemplate(socketPath, name string, payload map[string]any) (map[string]any, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("template name is required")
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("template payload is required")
+	}
+
+	templates, err := loadSavedTemplates(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if templates == nil {
+		templates = []map[string]any{}
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	newItem := map[string]any{
+		"id":         fmt.Sprintf("template-%d", time.Now().UnixNano()),
+		"name":       name,
+		"payload":    payload,
+		"source":     "saved",
+		"created_at": updatedAt,
+		"updated_at": updatedAt,
+	}
+	for i, item := range templates {
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["name"])), name) {
+			continue
+		}
+		newItem["id"] = item["id"]
+		if newItem["id"] == nil {
+			newItem["id"] = fmt.Sprintf("template-%d", time.Now().UnixNano())
+		}
+		templates[i] = newItem
+		if err := writeSavedTemplates(socketPath, templates); err != nil {
+			return nil, err
+		}
+		return newItem, nil
+	}
+	templates = append(templates, newItem)
+	if err := writeSavedTemplates(socketPath, templates); err != nil {
+		return nil, err
+	}
+	return newItem, nil
+}
+
+func deleteTemplate(socketPath, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("template name is required")
+	}
+	templates, err := loadSavedTemplates(socketPath)
+	if err != nil {
+		return err
+	}
+	filtered := make([]map[string]any, 0, len(templates))
+	for _, item := range templates {
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["name"])), name) {
+			filtered = append(filtered, item)
+		}
+	}
+	return writeSavedTemplates(socketPath, filtered)
+}
+
+func templatePayloadFromFlags() (map[string]any, error) {
+	blockSpecs, err := vmconfig.MergeBlockSpecs([]string(blkdev), []string(cowblk))
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"firmware":       firmware,
+		"kernel":         kernel,
+		"initrd":         initrd,
+		"block":          blockSpecs,
+		"iso":            iso,
+		"cmdline":        cmdline,
+		"serial_console": serialConsole,
+		"mem":            memSize,
+		"cpu":            numCPU,
+		"tap":            tapName,
+		"nat":            natMode,
+		"vhost":          vhostNet,
+	}
+	if strings.TrimSpace(baseDisk) != "" {
+		payload["base_disk"] = baseDisk
+	}
+	if snapshot != "" {
+		payload["snapshot"] = snapshot
+	}
+	if uid != "" {
+		payload["uid"] = uid
+	}
+	return payload, nil
+}
+
+func listTemplates(socketPath string) ([]map[string]any, error) {
+	return loadSavedTemplates(socketPath)
+}
+
+func newBaseDiskCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "base-disk",
+		Short: "Inspect and list the reusable base-disk images",
+	}
+	cmd.AddCommand(newBaseDiskListCmd())
+	return cmd
+}
+
+func newBaseDiskListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List available base disks in /var/lib/kube-vm/base-disks",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			disks, err := vmconfig.ListBaseDisks(vmconfig.DefaultBaseDiskDir)
+			if err != nil {
+				return err
+			}
+			if len(disks) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no base disks found")
+				return nil
+			}
+			for _, disk := range disks {
+				fmt.Fprintln(cmd.OutOrStdout(), disk)
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newTemplateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "template",
+		Short: "Manage saved VM configuration templates",
+	}
+	cmd.AddCommand(newTemplateListCmd())
+	cmd.AddCommand(newTemplateSaveCmd())
+	cmd.AddCommand(newTemplateDeleteCmd())
+	cmd.AddCommand(newTemplateStartCmd())
+	return cmd
+}
+
+func newTemplateListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List saved VM templates",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			templates, err := listTemplates(socketPath)
+			if err != nil {
+				return err
+			}
+			if len(templates) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no saved templates")
+				return nil
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "NAME\tID\tSUMMARY")
+			for _, item := range templates {
+				name := strings.TrimSpace(fmt.Sprint(item["name"]))
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", name, fmt.Sprint(item["id"]), templateSummary(item["payload"]))
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newTemplateSaveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "save <name>",
+		Short: "Save the current VM configuration as a template",
+		Args:  cobra.ExactArgs(1),
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if natMode && tapName != "" {
+				return fmt.Errorf("-nat and -tap are mutually exclusive")
+			}
+			if vhostNet && tapName == "" {
+				return fmt.Errorf("-vhost-net requires -tap")
+			}
+			if vhostNet && natMode {
+				return fmt.Errorf("-vhost-net cannot be used with -nat")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			payload, err := templatePayloadFromFlags()
+			if err != nil {
+				return err
+			}
+			item, err := saveTemplate(socketPath, args[0], payload)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "saved template %s id=%s\n", item["name"], item["id"])
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&uid, "uid", "u", uid, "VM UID to target")
+	cmd.Flags().StringVar(&firmware, "firmware", "", "path to guest firmware image (BIOS/UEFI blob)")
+	cmd.Flags().StringVar(&kernel, "kernel", "bzImage", "path to the guest kernel or URL")
+	cmd.Flags().StringVar(&initrd, "initrd", "", "path to the guest initrd or URL")
+	cmd.Flags().StringVar(&iso, "iso", "", "path to an ISO image file or URL")
+	cmd.Flags().StringVar(&cmdline, "cmdline", "console=hvc0 root=/dev/vda reboot=t", "guest kernel command line")
+	cmd.Flags().BoolVar(&serialConsole, "serial-console", false, "attach a COM1 serial console and switch the stock cmdline to ttyS0 unless --cmdline overrides it")
+	cmd.Flags().IntVar(&memSize, "mem", 1024, "set the VM's memory size in MiB")
+	cmd.Flags().IntVar(&numCPU, "cpu", 1, "set the number of VCPUs")
+	cmd.Flags().StringVar(&snapshot, "snapshot", "", "path to a snapshot to restore before starting the VM")
+	cmd.Flags().StringVar(&tapName, "tap", "", "attach a virtio-net device backed by TAP (optional name)")
+	cmd.Flags().StringVar(&baseDisk, "base-disk", "", "select a read-only base disk from /var/lib/kube-vm/base-disks; kube-vm creates a per-VM CoW overlay automatically")
+	cmd.Flags().BoolVar(&natMode, "nat", false, "attach a virtio-net device with host NAT (Linux only)")
+	cmd.Flags().BoolVar(&vhostNet, "vhost-net", false, "enable vhost-net acceleration for TAP networking (Linux only, requires -tap)")
+	cmd.Flags().Var(&blkdev, "block", "add a block device (multiple OK), append :ro for read-only")
+	cmd.Flags().Var(&cowblk, "cow-block", "add a writable copy-on-write block device as BASE=OVERLAY (multiple OK)")
+	return cmd
+}
+
+func newTemplateDeleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a saved VM template",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := deleteTemplate(socketPath, args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "deleted template %s\n", args[0])
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newTemplateStartCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "start <name>",
+		Short: "Start a VM from a saved template",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			templates, err := listTemplates(socketPath)
+			if err != nil {
+				return err
+			}
+			var payload map[string]any
+			for _, item := range templates {
+				if strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["name"])), args[0]) {
+					if p, ok := item["payload"].(map[string]any); ok {
+						payload = p
+					}
+					break
+				}
+			}
+			if payload == nil {
+				return fmt.Errorf("template %q not found", args[0])
+			}
+			if uid != "" {
+				payload = map[string]any{}
+				for k, v := range payload {
+					payload[k] = v
+				}
+				payload["uid"] = uid
+			}
+			resp, err := controlDial(socketPath, "start", payload)
+			if err != nil {
+				return err
+			}
+			if !resp.OK {
+				if resp.Error != "" {
+					return fmt.Errorf("%s", resp.Error)
+				}
+				return fmt.Errorf("control request failed")
+			}
+			fmt.Printf("uid=%s\n", resp.UID)
+			if !detach {
+				return attachConsole(socketPath, resp.UID)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&uid, "uid", "u", uid, "VM UID to target")
+	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "start VM and return without attaching console")
+	return cmd
+}
+
+func templateSummary(payload any) string {
+	m, ok := payload.(map[string]any)
+	if !ok || len(m) == 0 {
+		return "n/a"
+	}
+	parts := make([]string, 0, 4)
+	if mem, ok := m["mem"]; ok && mem != nil {
+		parts = append(parts, fmt.Sprintf("mem=%v", mem))
+	}
+	if cpu, ok := m["cpu"]; ok && cpu != nil {
+		parts = append(parts, fmt.Sprintf("cpu=%v", cpu))
+	}
+	if tap, ok := m["tap"]; ok && tap != nil && fmt.Sprint(tap) != "" {
+		parts = append(parts, fmt.Sprintf("tap=%v", tap))
+	} else if nat, ok := m["nat"]; ok && nat != nil && fmt.Sprint(nat) == "true" {
+		parts = append(parts, "nat=true")
+	}
+	if kernel, ok := m["kernel"]; ok && kernel != nil && fmt.Sprint(kernel) != "" {
+		parts = append(parts, fmt.Sprintf("kernel=%v", kernel))
+	}
+	if base, ok := m["base_disk"]; ok && base != nil && fmt.Sprint(base) != "" {
+		parts = append(parts, fmt.Sprintf("base=%s", filepath.Base(fmt.Sprint(base))))
+	}
+	if len(parts) == 0 {
+		return "custom"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func newListCmd() *cobra.Command {
@@ -321,17 +677,21 @@ func newStartCmd() *cobra.Command {
 				return err
 			}
 			payload := map[string]any{
-				"firmware": firmware,
-				"kernel":   kernel,
-				"initrd":   initrd,
-				"block":    blockSpecs,
-				"iso":      iso,
-				"cmdline":  cmdline,
-				"mem":      memSize,
-				"cpu":      numCPU,
-				"tap":      tapName,
-				"nat":      natMode,
-				"vhost":    vhostNet,
+				"firmware":       firmware,
+				"kernel":         kernel,
+				"initrd":         initrd,
+				"block":          blockSpecs,
+				"iso":            iso,
+				"cmdline":        cmdline,
+				"serial_console": serialConsole,
+				"mem":            memSize,
+				"cpu":            numCPU,
+				"tap":            tapName,
+				"nat":            natMode,
+				"vhost":          vhostNet,
+			}
+			if strings.TrimSpace(baseDisk) != "" {
+				payload["base_disk"] = baseDisk
 			}
 			if snapshot != "" {
 				payload["snapshot"] = snapshot
@@ -361,12 +721,14 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kernel, "kernel", "bzImage", "path to the guest kernel or URL")
 	cmd.Flags().StringVar(&initrd, "initrd", "", "path to the guest initrd or URL")
 	cmd.Flags().StringVar(&iso, "iso", "", "path to an ISO image file or URL")
-	cmd.Flags().StringVar(&cmdline, "cmdline", "console=hvc0 reboot=t", "guest kernel command line")
+	cmd.Flags().StringVar(&cmdline, "cmdline", "console=hvc0 root=/dev/vda reboot=t", "guest kernel command line")
+	cmd.Flags().BoolVar(&serialConsole, "serial-console", false, "attach a COM1 serial console and switch the stock cmdline to ttyS0 unless --cmdline overrides it")
 	cmd.Flags().IntVar(&memSize, "mem", 1024, "set the VM's memory size in MiB")
 	cmd.Flags().IntVar(&numCPU, "cpu", 1, "set the number of VCPUs")
 	cmd.Flags().StringVar(&snapshot, "snapshot", "", "path to a snapshot to restore before starting the VM")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "start VM and return without attaching console")
 	cmd.Flags().StringVar(&tapName, "tap", "", "attach a virtio-net device backed by TAP (optional name)")
+	cmd.Flags().StringVar(&baseDisk, "base-disk", "", "select a read-only base disk from /var/lib/kube-vm/base-disks; kube-vm creates a per-VM CoW overlay automatically")
 	cmd.Flags().BoolVar(&natMode, "nat", false, "attach a virtio-net device with host NAT (Linux only)")
 	cmd.Flags().BoolVar(&vhostNet, "vhost-net", false, "enable vhost-net acceleration for TAP networking (Linux only, requires -tap)")
 	cmd.Flags().Var(&blkdev, "block", "add a block device (multiple OK), append :ro for read-only")

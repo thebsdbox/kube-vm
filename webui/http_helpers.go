@@ -45,12 +45,14 @@ func parseStartRequest(r *http.Request) (string, map[string]any, error) {
 	copyFormValue(payload, r, "firmware")
 	copyFormValue(payload, r, "iso")
 	copyFormValue(payload, r, "cmdline")
+	copyFormValue(payload, r, "serial_console")
 	copyFormValue(payload, r, "tap")
 	copyFormValue(payload, r, "nat")
 	copyFormValue(payload, r, "vhost")
 	copyFormValue(payload, r, "snapshot")
 	copyFormValue(payload, r, "mem")
 	copyFormValue(payload, r, "cpu")
+	copyFormValue(payload, r, "base_disk")
 
 	blocks := splitBlockSpecs(strings.TrimSpace(r.FormValue("block")))
 	if err := appendCOWBlockSpec(&blocks, strings.TrimSpace(r.FormValue("cow_base")), strings.TrimSpace(r.FormValue("cow_overlay"))); err != nil {
@@ -79,6 +81,17 @@ func appendCOWBlockPayload(payload map[string]any, cowBase, cowOverlay string) e
 	delete(payload, "cow_base")
 	delete(payload, "cow_overlay")
 	return nil
+}
+
+func normalizeBaseDiskPayload(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	if v, ok := payload["base_disk"]; ok {
+		if s, ok := v.(string); ok {
+			payload["base_disk"] = strings.TrimSpace(s)
+		}
+	}
 }
 
 func appendCOWBlockSpec(blocks *[]string, cowBase, cowOverlay string) error {
@@ -114,25 +127,29 @@ func splitBlockSpecs(blocksRaw string) []string {
 }
 
 func coerceStringSlice(v any) []string {
+	appendSplit := func(out []string, raw string) []string {
+		for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == ',' }) {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	}
+
 	switch val := v.(type) {
 	case nil:
 		return nil
 	case []string:
 		out := make([]string, 0, len(val))
 		for _, s := range val {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				out = append(out, s)
-			}
+			out = appendSplit(out, s)
 		}
 		return out
 	case []any:
 		out := make([]string, 0, len(val))
 		for _, item := range val {
-			s := strings.TrimSpace(asJSONString(item))
-			if s != "" {
-				out = append(out, s)
-			}
+			out = appendSplit(out, strings.TrimSpace(asJSONString(item)))
 		}
 		return out
 	case string:
@@ -142,7 +159,7 @@ func coerceStringSlice(v any) []string {
 		if s == "" {
 			return nil
 		}
-		return []string{s}
+		return appendSplit(nil, s)
 	}
 }
 
@@ -186,6 +203,16 @@ func authorized(r *http.Request, token string) bool {
 		}
 	}
 	return false
+}
+
+func consoleReadOnlyPollRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	if r.URL.Path != "/api/v1/console/poll" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("console_mode")), "ro")
 }
 
 func randID() string {

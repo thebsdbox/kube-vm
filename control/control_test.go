@@ -89,6 +89,31 @@ func TestConsoleSessionReplaysLast500Lines(t *testing.T) {
 	}
 }
 
+func TestConsoleSessionKeepsPreviousClientsOnNewAttach(t *testing.T) {
+	t.Parallel()
+
+	session := NewConsoleSession()
+
+	serverConn1, clientConn1 := net.Pipe()
+	defer clientConn1.Close()
+	session.SetConn(serverConn1)
+
+	if _, err := session.Write([]byte("first\n")); err != nil {
+		t.Fatalf("session.Write first: %v", err)
+	}
+	readConsoleExact(t, clientConn1, "first\n")
+
+	serverConn2, clientConn2 := net.Pipe()
+	defer clientConn2.Close()
+	session.SetConn(serverConn2)
+
+	if _, err := session.Write([]byte("second\n")); err != nil {
+		t.Fatalf("session.Write second: %v", err)
+	}
+	readConsoleExact(t, clientConn1, "second\n")
+	readConsoleExact(t, clientConn2, "first\nsecond\n")
+}
+
 func mustDialConsole(t *testing.T, socketPath string) net.Conn {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

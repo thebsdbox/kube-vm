@@ -77,6 +77,33 @@ func TestBlockDeviceFromSpecLegacyOverlayQueryStillWorks(t *testing.T) {
 	}
 }
 
+func TestBlockDeviceFromSpecCreatesMissingOverlayParentDir(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "base")
+	overlayDir := filepath.Join(dir, "missing", "nested")
+	basePath := filepath.Join(baseDir, "disk.img")
+	overlayPath := filepath.Join(overlayDir, "disk.overlay")
+	if err := os.MkdirAll(filepath.Dir(basePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll base dir: %v", err)
+	}
+	if err := os.WriteFile(basePath, bytes.Repeat([]byte("X"), 4096), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+
+	dev, err := blockDeviceFromSpec(basePath+"?overlay="+overlayPath, false)
+	if err != nil {
+		t.Fatalf("blockDeviceFromSpec with missing overlay dir: %v", err)
+	}
+	if _, ok := dev.Storage.(io.WriterAt); !ok {
+		t.Fatal("storage does not implement io.WriterAt")
+	}
+	if _, err := os.Stat(overlayPath); err != nil {
+		t.Fatalf("overlay file should be created automatically: %v", err)
+	}
+}
+
 func TestMergeBlockSpecsAppendsCanonicalCOWSpecs(t *testing.T) {
 	t.Parallel()
 
@@ -92,5 +119,20 @@ func TestMergeBlockSpecsAppendsCanonicalCOWSpecs(t *testing.T) {
 	}
 	if want := "cow:/base/disk.img?overlay=%2Foverlay%2Fvm.overlay"; merged[1] != want {
 		t.Fatalf("merged[1] = %q, want %q", merged[1], want)
+	}
+}
+
+func TestNormalizeConsoleCmdlineUsesTTYS0WhenSerialConsoleEnabled(t *testing.T) {
+	t.Parallel()
+
+	if got := normalizeConsoleCmdline("", true); got != DefaultSerialConsoleCmdline {
+		t.Fatalf("normalizeConsoleCmdline(empty, true) = %q, want %q", got, DefaultSerialConsoleCmdline)
+	}
+	if got := normalizeConsoleCmdline(DefaultVirtioConsoleCmdline, true); got != DefaultSerialConsoleCmdline {
+		t.Fatalf("normalizeConsoleCmdline(default virtio, true) = %q, want %q", got, DefaultSerialConsoleCmdline)
+	}
+	custom := "console=ttyS1 root=/dev/vda"
+	if got := normalizeConsoleCmdline(custom, true); got != custom {
+		t.Fatalf("normalizeConsoleCmdline(custom, true) = %q, want %q", got, custom)
 	}
 }

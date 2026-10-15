@@ -7,11 +7,12 @@ import (
 )
 
 type consoleSession struct {
-	uid    string
-	conn   net.Conn
-	mu     sync.Mutex
-	buf    []byte
-	closed bool
+	uid        string
+	conn       net.Conn
+	mu         sync.Mutex
+	buf        []byte
+	baseOffset int64
+	closed     bool
 }
 
 func (s *consoleSession) append(data []byte) {
@@ -22,17 +23,28 @@ func (s *consoleSession) append(data []byte) {
 	}
 	s.buf = append(s.buf, data...)
 	if len(s.buf) > 1<<20 {
-		s.buf = s.buf[len(s.buf)-(1<<20):]
+		trim := len(s.buf) - (1 << 20)
+		s.buf = append([]byte(nil), s.buf[trim:]...)
+		s.baseOffset += int64(trim)
 	}
 }
 
-func (s *consoleSession) poll() ([]byte, bool) {
+func (s *consoleSession) poll(offset int64) ([]byte, bool, int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]byte, len(s.buf))
-	copy(out, s.buf)
-	s.buf = s.buf[:0]
-	return out, s.closed
+	if offset < s.baseOffset {
+		offset = s.baseOffset
+	}
+	start := int(offset - s.baseOffset)
+	if start < 0 {
+		start = 0
+	}
+	if start > len(s.buf) {
+		start = len(s.buf)
+	}
+	out := make([]byte, len(s.buf)-start)
+	copy(out, s.buf[start:])
+	return out, s.closed, s.baseOffset + int64(len(s.buf))
 }
 
 func (s *consoleSession) write(p []byte) error {
@@ -112,7 +124,6 @@ func (m *consoleManager) get(id string) *consoleSession {
 func (m *consoleManager) remove(id string) {
 	m.mu.Lock()
 	s := m.sessions[id]
-	delete(m.sessions, id)
 	if s != nil {
 		if current, ok := m.byUID[s.uid]; ok && current == id {
 			delete(m.byUID, s.uid)

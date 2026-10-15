@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -13,6 +14,39 @@ import (
 
 	"kube-vm/control"
 )
+
+func TestTemplateConfigRoundTrip(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "kube-vm.sock")
+	payload := map[string]any{"mem": 2048, "cpu": 2, "kernel": "bzImage", "tap": "tap0"}
+
+	stored, err := saveTemplate(socketPath, "ubuntu-k8s", payload)
+	if err != nil {
+		t.Fatalf("saveTemplate returned error: %v", err)
+	}
+	if stored["name"] != "ubuntu-k8s" {
+		t.Fatalf("stored name = %q, want %q", stored["name"], "ubuntu-k8s")
+	}
+
+	templates, err := listTemplates(socketPath)
+	if err != nil {
+		t.Fatalf("listTemplates returned error: %v", err)
+	}
+	if len(templates) != 1 {
+		t.Fatalf("len(templates) = %d, want 1", len(templates))
+	}
+	if templates[0]["name"] != "ubuntu-k8s" {
+		t.Fatalf("template[0].name = %q, want %q", templates[0]["name"], "ubuntu-k8s")
+	}
+
+	if err := deleteTemplate(socketPath, "ubuntu-k8s"); err != nil {
+		t.Fatalf("deleteTemplate returned error: %v", err)
+	}
+	if templates, err = listTemplates(socketPath); err != nil {
+		t.Fatalf("listTemplates after delete returned error: %v", err)
+	} else if len(templates) != 0 {
+		t.Fatalf("len(templates) after delete = %d, want 0", len(templates))
+	}
+}
 
 func TestResolveSSHTargetUsesIPAddressDirectly(t *testing.T) {
 	got, err := resolveSSHTarget("/tmp/unused.sock", "10.0.2.15", "")

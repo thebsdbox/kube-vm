@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -18,23 +19,29 @@ import (
 
 // Options describes a VM build request independent of its caller (CLI/daemon/web).
 type Options struct {
-	UID          string
-	FirmwarePath string
-	KernelPath   string
-	InitrdPath   string
-	BlockSpecs   []string
-	ISOPath      string
-	Cmdline      string
-	MemMiB       int
-	NumCPU       int
-	TapName      string
-	NATMode      bool
-	VhostNet     bool
-	VSOCKCID     uint64
-	VSOCKPort    uint32
-	ConsoleIn    io.Reader
-	ConsoleOut   io.Writer
+	UID           string
+	FirmwarePath  string
+	KernelPath    string
+	InitrdPath    string
+	BlockSpecs    []string
+	ISOPath       string
+	Cmdline       string
+	SerialConsole bool
+	MemMiB        int
+	NumCPU        int
+	TapName       string
+	NATMode       bool
+	VhostNet      bool
+	VSOCKCID      uint64
+	VSOCKPort     uint32
+	ConsoleIn     io.Reader
+	ConsoleOut    io.Writer
 }
+
+const (
+	DefaultVirtioConsoleCmdline = "console=hvc0 root=/dev/vda reboot=t"
+	DefaultSerialConsoleCmdline = "console=ttyS0 root=/dev/vda reboot=t"
+)
 
 // Build creates a vmm.Config and optional network metadata from a normalized options set.
 func Build(opts Options) (vmm.Config, vmnet.Config, error) {
@@ -42,10 +49,7 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	if kernel == "" {
 		kernel = "bzImage"
 	}
-	cmdline := opts.Cmdline
-	if cmdline == "" {
-		cmdline = "console=hvc0 reboot=t"
-	}
+	cmdline := normalizeConsoleCmdline(opts.Cmdline, opts.SerialConsole)
 	if opts.NATMode {
 		cmdline = ensureNATCmdline(cmdline)
 	}
@@ -87,24 +91,31 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	}
 
 	cfg := vmm.Config{
-		MemSize: memMiB << 20,
-		NumCPU:  numCPU,
-		Loader:  loader,
+		MemSize:   memMiB << 20,
+		NumCPU:    numCPU,
+		Loader:    loader,
+		SerialIn:  opts.ConsoleIn,
+		SerialOut: opts.ConsoleOut,
 		SnapshotConfig: vmm.SnapshotConfig{
-			MemSize:      memMiB << 20,
-			NumCPU:       numCPU,
-			FirmwarePath: opts.FirmwarePath,
-			KernelPath:   snapshotKernel,
-			InitrdPath:   opts.InitrdPath,
-			ISOPath:      opts.ISOPath,
-			Cmdline:      cmdline,
-			TapName:      opts.TapName,
-			NATMode:      opts.NATMode,
-			VhostNet:     opts.VhostNet,
-			VSOCKCID:     opts.VSOCKCID,
-			VSOCKPort:    opts.VSOCKPort,
-			BlockSpecs:   append([]string(nil), opts.BlockSpecs...),
+			MemSize:       memMiB << 20,
+			NumCPU:        numCPU,
+			FirmwarePath:  opts.FirmwarePath,
+			KernelPath:    snapshotKernel,
+			InitrdPath:    opts.InitrdPath,
+			ISOPath:       opts.ISOPath,
+			Cmdline:       cmdline,
+			TapName:       opts.TapName,
+			NATMode:       opts.NATMode,
+			VhostNet:      opts.VhostNet,
+			SerialConsole: opts.SerialConsole,
+			VSOCKCID:      opts.VSOCKCID,
+			VSOCKPort:     opts.VSOCKPort,
+			BlockSpecs:    append([]string(nil), opts.BlockSpecs...),
 		},
+	}
+	if !opts.SerialConsole {
+		cfg.SerialIn = nil
+		cfg.SerialOut = nil
 	}
 
 	for _, s := range opts.BlockSpecs {
@@ -151,6 +162,19 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	return cfg, netCfg, nil
 }
 
+func normalizeConsoleCmdline(cmdline string, serialConsole bool) string {
+	if cmdline == "" {
+		if serialConsole {
+			return DefaultSerialConsoleCmdline
+		}
+		return DefaultVirtioConsoleCmdline
+	}
+	if serialConsole && cmdline == DefaultVirtioConsoleCmdline {
+		return DefaultSerialConsoleCmdline
+	}
+	return cmdline
+}
+
 func readURL(s string) (body []byte, err error) {
 	defer func() {
 		if err != nil {
@@ -182,6 +206,21 @@ func readURL(s string) (body []byte, err error) {
 	}
 }
 
+func ensureParentDir(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" || dir == string(filepath.Separator) {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory %q: %w", dir, err)
+	}
+	return nil
+}
+
 func blockDeviceFromSpec(spec string, readOnly bool) (*virtio.BlockDevice, error) {
 	u, err := url.Parse(spec)
 	if err != nil {
@@ -207,6 +246,13 @@ func blockDeviceFromSpec(spec string, readOnly bool) (*virtio.BlockDevice, error
 
 	var stg virtio.BlockStorage
 	ro := readOnly
+
+	if err := ensureParentDir(basePath); err != nil {
+		return nil, err
+	}
+	if err := ensureParentDir(overlayPath); err != nil {
+		return nil, err
+	}
 
 	switch u.Scheme {
 	case "cow":

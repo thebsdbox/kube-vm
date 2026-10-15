@@ -51,6 +51,32 @@ func TestParseStartRequestFormBuildsCOWBlockSpec(t *testing.T) {
 	}
 }
 
+func TestParseStartRequestFormPreservesSelectedBaseDisk(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/v1/vms/start", strings.NewReader("uid=testvm&base_disk=/var/lib/kube-vm/base-disks/ubuntu.img&block=/data/seed.img:ro"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	_, payload, err := parseStartRequest(req)
+	if err != nil {
+		t.Fatalf("parseStartRequest returned error: %v", err)
+	}
+	if got := payload["base_disk"]; got != "/var/lib/kube-vm/base-disks/ubuntu.img" {
+		t.Fatalf("payload[base_disk] = %#v, want %q", got, "/var/lib/kube-vm/base-disks/ubuntu.img")
+	}
+}
+
+func TestParseStartRequestFormIncludesSerialConsole(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/v1/vms/start", strings.NewReader("uid=testvm&serial_console=on"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	_, payload, err := parseStartRequest(req)
+	if err != nil {
+		t.Fatalf("parseStartRequest returned error: %v", err)
+	}
+	if got := payload["serial_console"]; got != "on" {
+		t.Fatalf("payload[serial_console] = %#v, want %q", got, "on")
+	}
+}
+
 func TestAuthorizedAcceptsBearerAndHeaderToken(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/vms/start", strings.NewReader("uid=testvm"))
 	req.Header.Set("Authorization", "Bearer secret-token")
@@ -62,5 +88,17 @@ func TestAuthorizedAcceptsBearerAndHeaderToken(t *testing.T) {
 	req2.Header.Set("X-Auth-Token", "  secret-token  ")
 	if !authorized(req2, "secret-token") {
 		t.Fatalf("authorized with raw token header returned false")
+	}
+}
+
+func TestConsoleReadOnlyPollRequestAllowsNoAuth(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/console/poll?id=session123&offset=0&console_mode=ro", nil)
+	if !consoleReadOnlyPollRequest(req) {
+		t.Fatal("consoleReadOnlyPollRequest returned false for read-only poll")
+	}
+
+	req2 := httptest.NewRequest("GET", "/api/v1/console/poll?id=session123&offset=0&console_mode=rw", nil)
+	if consoleReadOnlyPollRequest(req2) {
+		t.Fatal("consoleReadOnlyPollRequest returned true for read-write poll")
 	}
 }
