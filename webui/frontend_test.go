@@ -34,6 +34,13 @@ func TestDashboardProgressiveDisclosure(t *testing.T) {
 	if strings.Index(markup, `id="machines-panel"`) > strings.Index(markup, `id="statistics-panel"`) {
 		t.Error("machines should precede detailed statistics")
 	}
+	panels := regexp.MustCompile(`<(?:section|details) class="panel" id="([^"]+)"`).FindAllStringSubmatch(markup, -1)
+	if len(panels) < 2 || panels[0][1] != "machines-panel" || panels[1][1] != "console-panel" {
+		t.Error("console must sit directly under virtual machines")
+	}
+	if !strings.Contains(markup, `<details class="panel" id="console-panel" open>`) {
+		t.Error("console should start expanded with a native collapse control")
+	}
 }
 
 func TestWorkspaceCardsAndNavigation(t *testing.T) {
@@ -50,6 +57,11 @@ func TestWorkspaceCardsAndNavigation(t *testing.T) {
 	configEnd := strings.Index(frontendHTML, "function setSavedConfigsVisible(")
 	if configStart < 0 || configEnd <= configStart {
 		t.Fatal("configuration library implementation not found")
+	}
+	revealStart := strings.Index(frontendHTML, "function revealConsole()")
+	revealEnd := strings.Index(frontendHTML, "function delay(")
+	if revealStart < 0 || revealEnd <= revealStart {
+		t.Fatal("console reveal implementation not found")
 	}
 	script := `
 const assert = require('node:assert/strict');
@@ -82,6 +94,10 @@ const rows = new Element();
 const statusEl = new Element();
 const consoleUID = new Element();
 const storageSamples = new Map();
+const statsHistory = {samples: []};
+let terminalFits = 0;
+const term = {fit() { assert.equal(document.getElementById('console-panel').open, true); terminalFits++; }};
+const consoleTermEl = {closest: () => document.getElementById('console-panel')};
 const fmtBytes = bytes => bytes + ' B';
 const fmtUptime = seconds => seconds + 's';
 const bootLabel = vm => vm.kernel;
@@ -102,7 +118,7 @@ function setStatsHistoryVisible(value) { historyVisible = value; }
 function renderStatsHistory() {}
 function setSavedConfigsVisible() {}
 function text(el) { return [el.textContent, ...el.children.map(text)].join('\n'); }
-` + frontendHTML[configStart:configEnd] + frontendHTML[start:end] + `
+` + frontendHTML[configStart:configEnd] + frontendHTML[start:end] + frontendHTML[revealStart:revealEnd] + `
 (async () => {
 	savedConfigs = [{id: 'global', source: 'global', name: '<img src=x onerror=alert(1)>', payload: {kernel: '<kernel>'}}];
 	renderConfigRows();
@@ -143,10 +159,36 @@ function text(el) { return [el.textContent, ...el.children.map(text)].join('\n')
 	assert.equal(source.value, 'vm:' + vm.uid); assert.equal(historyVisible, true);
 	assert.match(text(document.getElementById('vm-statistics')), /Host resources/);
 	assert.match(text(document.getElementById('vm-statistics')), /disk counters/);
+	const networkVM = {...vm, nics: [{name: '<tap0>', mode: 'tap', rx_bytes: 4096, tx_bytes: 2048, rx_packets: 10, tx_packets: 5}]};
+	showRows([networkVM]);
+	assert.match(text(rows), /Network totals · RX 4096 B · TX 2048 B/);
+	assert.match(text(rows), /Rates: sampling/);
+	statsHistory.samples.push({series: new Map([
+		['vm:' + vm.uid, {rx: 1024, tx: 512}],
+		['vm:' + vm.uid + ':nic:0', {rx: 1024, tx: 512, rxPackets: 3, txPackets: 2}]
+	])});
+	showRows([networkVM]);
+	assert.match(text(rows), /RX 1024 B\/s · TX 512 B\/s/);
+	const networkButton = rows.querySelectorAll('button').find(button => button.getAttribute('data-action') === 'network');
+	assert.equal(networkButton.getAttribute('aria-label'), 'Network statistics · ' + vm.uid);
+	await networkButton.events.click();
+	assert.equal(document.getElementById('stats-history-metric').value, 'network');
+	assert.match(text(document.getElementById('vm-statistics')), /RX 3.0 packets\/s · TX 2.0 packets\/s/);
+	assert.ok(text(document.getElementById('vm-statistics')).includes('<tap0>'));
 	const navigation = new Element('button'); navigation.setAttribute('data-reveal', 'connection-settings');
 	elements.set('connection-settings', new Element('details'));
 	document.querySelectorAll = () => [navigation];
 	initWorkspace();
+	const consolePanel = document.getElementById('console-panel');
+	consolePanel.open = false; consolePanel.events.toggle.call(consolePanel);
+	assert.equal(terminalFits, 0);
+	consolePanel.open = true; consolePanel.events.toggle.call(consolePanel);
+	assert.equal(terminalFits, 1);
+	consolePanel.open = false;
+	revealConsole();
+	assert.equal(consolePanel.open, true);
+	assert.equal(consolePanel.scrolled, true);
+	assert.equal(terminalFits, 2); // Refit only after exposing the terminal.
 	navigation.events.click();
 	assert.equal(document.getElementById('connection-settings').open, true);
 	const selectedVM = document.getElementById('statistics-vm');

@@ -219,9 +219,17 @@ They describe guest-visible block I/O, not filesystem used/free space or physica
 host I/O (for example, COW write amplification is not included).
 
 The dashboard opens with responsive VM cards containing essential resources,
-state, and networking. **Console** connects directly; **Details & actions**
+state, and networking. Network-enabled VM cards show RX/TX byte totals and live
+throughput; click the rate summary to open that VM's network graph. The detailed
+network view also shows per-interface byte and packet rates.
+**Console** connects directly; **Details & actions**
 reveals boot paths, errors, pause/resume, snapshots, and stop controls. Stopping
 a VM requires confirmation.
+
+The **Console** panel sits directly below **Virtual machines** and starts
+expanded. Its **− / +** header control collapses or expands the view without
+disconnecting or stopping console output collection. Opening a console from a
+VM card (including auto-connect and shared links) expands the panel again.
 
 Statistics are hidden by default. Open **Statistics** in the toolbar for daemon
 metrics, or a VM's **Statistics** button for its host resources, network counters,

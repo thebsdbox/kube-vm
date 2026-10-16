@@ -151,6 +151,8 @@ const frontendHTML = `<!doctype html>
 	.vm-card .card-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 	.vm-resources { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 0.85rem; margin: 18px 0; }
 	.vm-network { font-size: 0.82rem; color: var(--muted); overflow-wrap: anywhere; }
+	.vm-traffic { margin-top: 12px; color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+	.traffic-link { display: block; min-height: 0; padding: 5px 0; background: transparent; color: var(--accent); text-align: left; font-size: 0.78rem; }
 	.vm-more { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
 	.vm-more > summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
 	.vm-more dl { font-size: 0.8rem; }
@@ -194,6 +196,33 @@ const frontendHTML = `<!doctype html>
 			<div class="panel-head"><div><h2 id="machines-heading">Virtual machines</h2><p class="section-note">Your machines, without the noise. Open a console or explore details when you need them.</p></div><button class="ghost" type="button" id="refresh">Refresh</button></div>
 			<div class="content"><div class="vm-grid" id="vm-rows"><div class="empty-state">Loading virtual machines…</div></div></div>
 		</section>
+
+		<details class="panel" id="console-panel" open>
+			<summary><div><strong>Console</strong><small>Connect to a machine or share a dedicated terminal window. Collapse without disconnecting.</small></div></summary>
+			<div class="content two">
+				<div>
+					<div class="console"><div class="console-shell" id="console-terminal"></div></div>
+					<div class="status" id="console-hint">Click terminal to focus. Paste with Ctrl+Shift+V or Cmd+V. Ctrl+L clears local terminal view.</div>
+				</div>
+				<div class="console-tools">
+					<label for="console-uid">Machine ID</label><input id="console-uid" placeholder="Select Console on a VM above" />
+					<div class="actions"><button class="primary" id="console-open" type="button">Open Console</button><button class="ghost" id="console-open-window" type="button">Open Shared Window</button><button class="ghost" id="console-copy-link" type="button">Copy Share Link</button><button class="ghost" id="console-close" type="button">Close</button></div>
+					<div style="margin-top:10px;">
+						<label for="console-share-mode">Shared window mode</label>
+						<select id="console-share-mode">
+							<option value="rw">Read-write</option>
+							<option value="ro">Read-only</option>
+						</select>
+					</div>
+					<div id="console-fallback-controls" style="display:none; margin-top:8px;">
+						<label>Fallback input</label>
+						<textarea id="console-fallback-input" placeholder="Type input for guest console"></textarea>
+						<div class="actions"><button class="warn" id="console-fallback-send" type="button">Send Input</button></div>
+					</div>
+					<div class="status" id="console-status"></div>
+				</div>
+			</div>
+		</details>
 
 		<details class="panel" id="statistics-panel">
 			<summary><div><strong>Statistics explorer</strong><small>Server health, VM resources, network traffic, storage I/O, and historical graphs</small></div></summary>
@@ -304,32 +333,6 @@ const frontendHTML = `<!doctype html>
 			</div>
 		</section>
 
-		<section class="panel" id="console-panel">
-			<div class="panel-head"><div><h2>Console</h2><p class="section-note">Connect to a machine or share a dedicated terminal window.</p></div></div>
-      <div class="content two">
-				<div>
-					<div class="console"><div class="console-shell" id="console-terminal"></div></div>
-					<div class="status" id="console-hint">Click terminal to focus. Paste with Ctrl+Shift+V or Cmd+V. Ctrl+L clears local terminal view.</div>
-				</div>
-				<div class="console-tools">
-					<label for="console-uid">Machine ID</label><input id="console-uid" placeholder="Select Console on a VM above" />
-		  <div class="actions"><button class="primary" id="console-open" type="button">Open Console</button><button class="ghost" id="console-open-window" type="button">Open Shared Window</button><button class="ghost" id="console-copy-link" type="button">Copy Share Link</button><button class="ghost" id="console-close" type="button">Close</button></div>
-		  <div style="margin-top:10px;">
-			<label for="console-share-mode">Shared window mode</label>
-			<select id="console-share-mode">
-				<option value="rw">Read-write</option>
-				<option value="ro">Read-only</option>
-			</select>
-		  </div>
-					<div id="console-fallback-controls" style="display:none; margin-top:8px;">
-						<label>Fallback input</label>
-						<textarea id="console-fallback-input" placeholder="Type input for guest console"></textarea>
-						<div class="actions"><button class="warn" id="console-fallback-send" type="button">Send Input</button></div>
-					</div>
-          <div class="status" id="console-status"></div>
-        </div>
-      </div>
-    </section>
 		<details class="panel" id="connection-settings">
 			<summary><div><strong>Connection settings</strong><small>API authentication for this browser</small></div></summary>
 			<div class="content"><label for="token">Bearer token (optional)</label><input type="password" id="token" autocomplete="off" placeholder="Matches the server's web token" /><p class="section-note">Stored in local storage for this browser origin. Only use a trusted browser.</p></div>
@@ -1316,11 +1319,16 @@ const frontendHTML = `<!doctype html>
 			const network = section('Network activity');
 			const nics = Array.isArray(vm.nics) ? vm.nics : [];
 			if (!nics.length) network.appendChild(uiElement('p', '', 'No network counters available.'));
-			for (const nic of nics) {
+			for (const [index, nic] of nics.entries()) {
 				if (!nic) continue;
 				network.appendChild(uiElement('p', 'mono', (nic.name || 'NIC') + ' · ' + (nic.mode || 'unknown')));
 				network.appendChild(uiElement('p', 'mono', 'RX ' + fmtBytes(nic.rx_bytes) + ' / ' + (nic.rx_packets || 0) + ' packets'));
 				network.appendChild(uiElement('p', 'mono', 'TX ' + fmtBytes(nic.tx_bytes) + ' / ' + (nic.tx_packets || 0) + ' packets'));
+				const point = latestNetworkPoint('vm:' + vm.uid + ':nic:' + index);
+				network.appendChild(uiElement('p', 'mono', networkRateText(point)));
+				if (point && Number.isFinite(point.rxPackets) && Number.isFinite(point.txPackets)) {
+					network.appendChild(uiElement('p', 'mono', 'RX ' + point.rxPackets.toFixed(1) + ' packets/s · TX ' + point.txPackets.toFixed(1) + ' packets/s'));
+				}
 			}
 			const storage = section('Storage activity');
 			storage.appendChild(storageStatsView(vm));
@@ -1341,13 +1349,25 @@ const frontendHTML = `<!doctype html>
 			select.value = dashboardVMs.some(vm => vm.uid === selected) ? selected : '';
 		}
 
-		function openVMStatistics(uid) {
+		function openVMStatistics(uid, metric) {
 			revealPanel('statistics-panel');
 			document.getElementById('statistics-vm').value = uid;
 			renderVMStatistics();
 			const source = document.getElementById('stats-history-source');
 			if (Array.from(source.options).some(option => option.value === 'vm:' + uid)) source.value = 'vm:' + uid;
+			if (metric) document.getElementById('stats-history-metric').value = metric;
 			setStatsHistoryVisible(true);
+		}
+
+		function latestNetworkPoint(key) {
+			const latest = statsHistory.samples[statsHistory.samples.length - 1];
+			return latest ? latest.series.get(key) : null;
+		}
+
+		function networkRateText(point) {
+			return point && Number.isFinite(point.rx) && Number.isFinite(point.tx)
+				? 'RX ' + fmtBytes(point.rx) + '/s · TX ' + fmtBytes(point.tx) + '/s'
+				: 'Rates: sampling…';
 		}
 
 		function createVMCard(vm) {
@@ -1372,6 +1392,16 @@ const frontendHTML = `<!doctype html>
 				node.addEventListener('click', () => Promise.resolve().then(callback).catch(err => statusEl.textContent = err.message));
 				parent.appendChild(node);
 				return node;
+			}
+			const nics = (Array.isArray(vm.nics) ? vm.nics : []).filter(Boolean);
+			if (nics.length) {
+				const traffic = uiElement('div', 'vm-traffic');
+				const bytes = field => nics.reduce((sum, nic) => sum + (Number.isFinite(nic[field]) && nic[field] >= 0 ? nic[field] : 0), 0);
+				traffic.appendChild(uiElement('div', 'mono', 'Network totals · RX ' + fmtBytes(bytes('rx_bytes')) + ' · TX ' + fmtBytes(bytes('tx_bytes'))));
+				const link = button(traffic, networkRateText(latestNetworkPoint('vm:' + vm.uid)), 'network', () => openVMStatistics(vm.uid, 'network'), 'traffic-link');
+				link.setAttribute('aria-label', 'Network statistics · ' + vm.uid);
+				link.title = 'View network throughput graph';
+				card.appendChild(traffic);
 			}
 			button(actions, 'Console', 'console', () => { consoleUID.value = vm.uid; return openConsole(); }, 'primary');
 			button(actions, 'Statistics', 'statistics', () => openVMStatistics(vm.uid));
@@ -1432,6 +1462,9 @@ const frontendHTML = `<!doctype html>
 			for (const button of document.querySelectorAll('[data-reveal]')) {
 				button.addEventListener('click', () => revealPanel(button.getAttribute('data-reveal')));
 			}
+			document.getElementById('console-panel').addEventListener('toggle', function() {
+				if (this.open && term && typeof term.fit === 'function') term.fit();
+			});
 			document.getElementById('statistics-vm').addEventListener('change', function() {
 				renderVMStatistics();
 				const source = document.getElementById('stats-history-source');
@@ -1939,6 +1972,8 @@ const frontendHTML = `<!doctype html>
 
 		function revealConsole() {
 			const panel = consoleTermEl && consoleTermEl.closest ? consoleTermEl.closest('.panel') : consoleTermEl;
+			if (panel && panel.tagName === 'DETAILS') panel.open = true;
+			if (term && typeof term.fit === 'function') term.fit();
 			if (panel && panel.scrollIntoView) {
 				panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 			}
@@ -1993,9 +2028,6 @@ const frontendHTML = `<!doctype html>
 				consoleTermEl.textContent += 'connected to ' + uid + '\n\n';
 			}
       consoleStatus.textContent = 'console opened for ' + uid;
-			if (term && typeof term.fit === 'function') {
-				term.fit();
-			}
 			revealConsole();
 			if (term) {
 				term.focus();
@@ -2027,9 +2059,6 @@ const frontendHTML = `<!doctype html>
 				}
 			}
 			consoleStatus.textContent = 'shared console opened' + (consoleReadOnly ? ' (read-only)' : ' (read-write)');
-			if (term && typeof term.fit === 'function') {
-				term.fit();
-			}
 			revealConsole();
 			if (term) {
 				term.focus();
