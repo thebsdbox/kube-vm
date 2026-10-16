@@ -383,7 +383,9 @@ func (d *device) HandleMMIO(off int, data []byte, isWrite bool) (err error) {
 				d.state.intStatus |= intStatusConfigChange
 				d.mu.Unlock()
 				var notifyErr error
-				if d.bus.cfg.Notify != nil { notifyErr = d.bus.cfg.Notify(d.info.IRQ) }
+				if d.bus.cfg.Notify != nil {
+					notifyErr = d.bus.cfg.Notify(d.info.IRQ)
+				}
 				d.mu.Lock()
 				if notifyErr != nil {
 					slog.Error("virtio config change notification failed",
@@ -547,7 +549,9 @@ func (d *device) writeStatus(v uint32) error {
 		d.mu.Unlock()
 		err := d.handler.Ready(features)
 		d.mu.Lock()
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -587,7 +591,7 @@ func (d *device) writeDriverFeatures(v uint32) error {
 
 	d.state.driverFeatures |= uint64(v) << (32 * d.state.driverFeaturesSel)
 
-	if d.state.driverFeatures &^ d.getFeatures() != 0 {
+	if d.state.driverFeatures&^d.getFeatures() != 0 {
 		return unix.EINVAL
 	}
 
@@ -599,7 +603,9 @@ func (d *device) writeQueueSel(v uint32) error {
 		return unix.EPERM
 	}
 
-	if v >= uint32(len(d.state.queue)) { return unix.EINVAL }
+	if v >= uint32(len(d.state.queue)) {
+		return unix.EINVAL
+	}
 	d.state.queueSel = v
 	return nil
 }
@@ -684,9 +690,13 @@ func (d *device) writeQueueReady(v uint32) error {
 	d.state.version++
 
 	qn := int(d.state.queueSel)
-	if !validQueueNumber(d.info.Type, qn) { return unix.EINVAL }
+	if !validQueueNumber(d.info.Type, qn) {
+		return unix.EINVAL
+	}
 	q, err := d.newQueue(*d.selectedQueue())
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	qc := make(chan struct{}, 1)
 	d.qC[qn] = qc
 	d.queues[qn] = q
@@ -698,10 +708,14 @@ func (d *device) writeQueueReady(v uint32) error {
 
 func validQueueNumber(typ virtio.DeviceID, n int) bool {
 	switch typ {
-	case virtio.BlockDeviceID: return n == 0
-	case virtio.NetworkDeviceID, virtio.ConsoleDeviceID: return n >= 0 && n < 2
-	case virtio.SocketDeviceID: return n >= 0 && n < 3
-	default: return false
+	case virtio.BlockDeviceID:
+		return n == 0
+	case virtio.NetworkDeviceID, virtio.ConsoleDeviceID:
+		return n >= 0 && n < 2
+	case virtio.SocketDeviceID:
+		return n >= 0 && n < 3
+	default:
+		return false
 	}
 }
 
@@ -710,13 +724,17 @@ func (d *device) newQueue(qs queueState) (*virtq.Queue, error) {
 		return nil, fmt.Errorf("invalid packed queue size %d", qs.NumDesc)
 	}
 	region := func(addr uint64, size int, alignment uint64) ([]byte, error) {
-		if addr % alignment != 0 || addr > ^uint64(0)-uint64(size) {
+		if addr%alignment != 0 || addr > ^uint64(0)-uint64(size) {
 			return nil, fmt.Errorf("invalid queue memory address %#x", addr)
 		}
-		if d.bus.cfg.MemAt == nil { return nil, fmt.Errorf("queue memory is not installed") }
+		if d.bus.cfg.MemAt == nil {
+			return nil, fmt.Errorf("queue memory is not installed")
+		}
 		p, err := d.bus.cfg.MemAt(addr, size)
-		if err != nil { return nil, err }
-		if len(p) != size || uintptr(unsafe.Pointer(&p[0])) % uintptr(alignment) != 0 {
+		if err != nil {
+			return nil, err
+		}
+		if len(p) != size || uintptr(unsafe.Pointer(&p[0]))%uintptr(alignment) != 0 {
 			return nil, fmt.Errorf("short or unaligned queue memory at %#x", addr)
 		}
 		return p, nil
@@ -739,7 +757,9 @@ func (d *device) newQueue(qs queueState) (*virtq.Queue, error) {
 	starts := [3]uint64{qs.DescAddr, qs.DriverAddr, qs.DeviceAddr}
 	for i := range starts {
 		for j := 0; j < i; j++ {
-			if starts[i] < ends[j] && starts[j] < ends[i] { return nil, fmt.Errorf("overlapping queue memory regions") }
+			if starts[i] < ends[j] && starts[j] < ends[i] {
+				return nil, fmt.Errorf("overlapping queue memory regions")
+			}
 		}
 	}
 
@@ -750,14 +770,16 @@ func (d *device) newQueue(qs queueState) (*virtq.Queue, error) {
 	)
 
 	q := virtq.New(ring, drvE, devE, virtq.Config{
-		MemAt: d.bus.cfg.MemAt,
+		MemAt:       d.bus.cfg.MemAt,
 		BeginAccess: d.bus.beginAccess,
 		Notify: func() error {
 			d.mu.Lock()
 
 			d.state.intStatus |= intStatusUsedBuffer
 			d.mu.Unlock()
-			if d.bus.cfg.Notify == nil { return nil }
+			if d.bus.cfg.Notify == nil {
+				return nil
+			}
 			if err := d.bus.cfg.Notify(d.info.IRQ); err != nil {
 				return err
 			}

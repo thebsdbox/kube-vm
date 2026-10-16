@@ -33,7 +33,7 @@ func (m *VM) memoryAt(addr uint64, size int) ([]byte, error) {
 	if addr > uint64(len(m.mem)) || uint64(size) > uint64(len(m.mem))-addr {
 		return nil, errors.New("guest buffer exceeds RAM")
 	}
-	return m.mem[int(addr):int(addr)+size], nil
+	return m.mem[int(addr) : int(addr)+size], nil
 }
 
 // SerialState contains UART registers, not host descriptors or connections.
@@ -74,14 +74,18 @@ func (s *VMSnapshot) ValidateRestore() error {
 		return errors.New("snapshot serial console state disagrees with launch metadata")
 	}
 	wantDisks := len(s.Config.BlockSpecs)
-	if s.Config.ISOPath != "" { wantDisks++ }
+	if s.Config.ISOPath != "" {
+		wantDisks++
+	}
 	deviceDisks := 0
 	for _, device := range s.DeviceState {
 		if device.SnapshotVersion != 1 {
 			return errors.New("snapshot device state is missing packed-queue cursor metadata")
 		}
 		for n, queue := range device.Queue {
-			if queue.Ready == 0 { continue }
+			if queue.Ready == 0 {
+				continue
+			}
 			cursor, ok := device.QueueCursors[n]
 			if !ok || queue.Ready != 1 || queue.NumDesc == 0 || queue.NumDesc > 1<<15 ||
 				uint32(cursor.AvailIndex) >= queue.NumDesc || uint32(cursor.UsedIndex) >= queue.NumDesc ||
@@ -89,7 +93,9 @@ func (s *VMSnapshot) ValidateRestore() error {
 				return fmt.Errorf("snapshot device %v queue %d has incomplete or invalid packed cursor state", device.Type, n)
 			}
 		}
-		if device.Type == virtio.BlockDeviceID { deviceDisks++ }
+		if device.Type == virtio.BlockDeviceID {
+			deviceDisks++
+		}
 	}
 	if len(s.Storage) != wantDisks || deviceDisks != wantDisks {
 		return errors.New("snapshot disk assets, devices, and launch metadata disagree")
@@ -145,8 +151,8 @@ func (m *VM) captureSnapshot(dir string) (state *VMSnapshot, err error) {
 	state = &VMSnapshot{
 		Magic: snapshotMagic, Version: SnapshotVersion, Architecture: runtime.GOARCH,
 		CreatedAt: time.Now().UTC(),
-		Config: m.snapshotConfig.withVMDefaults(len(m.mem), len(m.cpu)),
-		CPU: make([]VMSnapshotCPU, len(m.cpu)), StorageDir: filepath.Base(dir),
+		Config:    m.snapshotConfig.withVMDefaults(len(m.mem), len(m.cpu)),
+		CPU:       make([]VMSnapshotCPU, len(m.cpu)), StorageDir: filepath.Base(dir),
 	}
 	if state.Config.VhostNet || state.Config.VSOCKPort != 0 {
 		return nil, errors.New("vhost-net and VSock snapshots are not supported")

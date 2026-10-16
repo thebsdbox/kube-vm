@@ -25,7 +25,9 @@ func writeLegacyCheckpoint(t *testing.T) string {
 	if err := gob.NewEncoder(&buf).Encode(&vmm.VMSnapshot{Magic: "kube-vm-snapshot-v1", Version: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 
@@ -49,7 +51,9 @@ func TestSnapshotStartDoesNotNormalizeOrdinaryBaseDisk(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "snapshot version") {
 		t.Fatalf("snapshot boot should validate checkpoint, not ordinary boot defaults: %v", err)
 	}
-	if len(s.vms) != 0 { t.Fatal("failed snapshot boot registered a VM") }
+	if len(s.vms) != 0 {
+		t.Fatal("failed snapshot boot registered a VM")
+	}
 }
 
 func TestVMStorageStatsSnapshotAndDetails(t *testing.T) {

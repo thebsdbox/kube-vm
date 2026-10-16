@@ -865,26 +865,26 @@ func (m *VM) clearImmediateExitLocked() {
 
 // ThreadIDs returns current host thread IDs used by the VM's VCPU workers.
 type VMSnapshotCPU struct {
-	Regs  kvm.Regs
-	Sregs kvm.Sregs
-	FPU   kvm.FPU
-	MP    kvm.MPState
+	Regs     kvm.Regs
+	Sregs    kvm.Sregs
+	FPU      kvm.FPU
+	MP       kvm.MPState
 	Hardware *kvm.CPUState
 }
 
 type VMSnapshot struct {
-	Magic       string
-	Version     int
-	CreatedAt   time.Time
-	Config      SnapshotConfig
-	Mem         []byte
-	CPU         []VMSnapshotCPU
-	DeviceState []mmio.DeviceState
-	Architecture string
-	Hardware     *kvm.VMState
-	StorageDir   string
-	Storage      []mmio.StorageState
-	Serial       *SerialState
+	Magic         string
+	Version       int
+	CreatedAt     time.Time
+	Config        SnapshotConfig
+	Mem           []byte
+	CPU           []VMSnapshotCPU
+	DeviceState   []mmio.DeviceState
+	Architecture  string
+	Hardware      *kvm.VMState
+	StorageDir    string
+	Storage       []mmio.StorageState
+	Serial        *SerialState
 	PCIConfigAddr uint32
 }
 

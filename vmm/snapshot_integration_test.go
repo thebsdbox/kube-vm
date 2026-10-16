@@ -49,32 +49,54 @@ func runCheckpointVM(t *testing.T, vm *vmm.VM) {
 }
 
 func TestSnapshotGuestContinuation(t *testing.T) {
-	if isGuest { t.Skip("host-only KVM continuation test") }
+	if isGuest {
+		t.Skip("host-only KVM continuation test")
+	}
 	requireKVM(t)
 	source, err := vmm.New(vmm.Config{MemSize: vmm.MemSizeMin, NumCPU: 1, Loader: checkpointLoopLoader{}})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	runCheckpointVM(t, source)
 	path := filepath.Join(t.TempDir(), "source.snap")
 	var saved *vmm.VMSnapshot
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := source.SaveState(path); err != nil { t.Fatalf("save running guest: %v", err) }
+		if err := source.SaveState(path); err != nil {
+			t.Fatalf("save running guest: %v", err)
+		}
 		saved, err = vmm.ReadSnapshot(path)
-		if err != nil { t.Fatal(err) }
-		if binary.LittleEndian.Uint32(saved.Mem[0x2000:]) != 0 { break }
-		if time.Now().After(deadline) { t.Fatal("source guest never executed") }
+		if err != nil {
+			t.Fatal(err)
+		}
+		if binary.LittleEndian.Uint32(saved.Mem[0x2000:]) != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("source guest never executed")
+		}
 	}
-	if saved.CPU[0].Hardware.Regs.RAX != 0x1234 { t.Fatal("source CPU sentinel changed") }
+	if saved.CPU[0].Hardware.Regs.RAX != 0x1234 {
+		t.Fatal("source CPU sentinel changed")
+	}
 	restored, err := vmm.New(vmm.Config{
 		MemSize: saved.Config.MemSize, NumCPU: saved.Config.NumCPU,
 		Snapshot: saved, SnapshotConfig: saved.Config,
 	})
-	if err != nil { t.Fatalf("fresh checkpoint boot: %v", err) }
+	if err != nil {
+		t.Fatalf("fresh checkpoint boot: %v", err)
+	}
 	// Capture before running: state must be identical, not a reboot at the loader.
 	copyPath := filepath.Join(t.TempDir(), "restored.snap")
-	if err := restored.SaveState(copyPath); err != nil { _ = restored.Close(); t.Fatal(err) }
+	if err := restored.SaveState(copyPath); err != nil {
+		_ = restored.Close()
+		t.Fatal(err)
+	}
 	copyState, err := vmm.ReadSnapshot(copyPath)
-	if err != nil { _ = restored.Close(); t.Fatal(err) }
+	if err != nil {
+		_ = restored.Close()
+		t.Fatal(err)
+	}
 	if !bytes.Equal(saved.Mem, copyState.Mem) || saved.CPU[0].Hardware.Regs != copyState.CPU[0].Hardware.Regs {
 		_ = restored.Close()
 		t.Fatal("RAM/registers were not preserved by fresh checkpoint boot")
@@ -82,13 +104,21 @@ func TestSnapshotGuestContinuation(t *testing.T) {
 	runCheckpointVM(t, restored)
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		if err := restored.SaveState(copyPath); err != nil { t.Fatalf("save resumed guest: %v", err) }
+		if err := restored.SaveState(copyPath); err != nil {
+			t.Fatalf("save resumed guest: %v", err)
+		}
 		next, err := vmm.ReadSnapshot(copyPath)
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		if binary.LittleEndian.Uint32(next.Mem[0x2000:]) != binary.LittleEndian.Uint32(saved.Mem[0x2000:]) {
-			if next.CPU[0].Hardware.Regs.RAX != 0x1234 { t.Fatal("resumed CPU sentinel changed") }
+			if next.CPU[0].Hardware.Regs.RAX != 0x1234 {
+				t.Fatal("resumed CPU sentinel changed")
+			}
 			break
 		}
-		if time.Now().After(deadline) { t.Fatal("restored guest did not resume execution") }
+		if time.Now().After(deadline) {
+			t.Fatal("restored guest did not resume execution")
+		}
 	}
 }

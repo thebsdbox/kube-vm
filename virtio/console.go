@@ -154,7 +154,7 @@ func (h *consoleHandler) runRx(q *virtq.Queue, notify <-chan struct{}) {
 	}
 }
 
-func (h *consoleHandler) SnapshotHandlerState() []byte { return append([]byte(nil), h.pending...) }
+func (h *consoleHandler) SnapshotHandlerState() []byte    { return append([]byte(nil), h.pending...) }
 func (*consoleHandler) ValidateHandlerState([]byte) error { return nil }
 func (h *consoleHandler) RestoreHandlerState(s []byte) error {
 	h.pending = append([]byte(nil), s...)

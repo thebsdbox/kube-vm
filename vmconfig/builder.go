@@ -19,12 +19,12 @@ import (
 
 // Options describes a VM build request independent of its caller (CLI/daemon/web).
 type Options struct {
-	UID            string
-	NetworkUID     string
+	UID        string
+	NetworkUID string
 	// Snapshot bypasses decoding SnapshotPath when supplied. SnapshotPath still
 	// locates sibling storage assets (an empty path means the working directory).
-	SnapshotPath   string
-	Snapshot       *vmm.VMSnapshot
+	SnapshotPath string
+	Snapshot     *vmm.VMSnapshot
 	// RestoreTapName overrides only a saved TAP backend, never the network mode.
 	RestoreTapName string
 	FirmwarePath   string
