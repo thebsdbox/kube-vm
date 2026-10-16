@@ -29,6 +29,7 @@ type VM struct {
 // VCPU is a virtual CPU file descriptor.
 type VCPU struct {
 	*os.File
+	vm *VM // Needed for VM-scoped capabilities such as the XSAVE2 buffer size.
 }
 
 // Cap is a KVM_CHECK_EXTENSION identifier.
@@ -121,7 +122,7 @@ func CreateVCPU(vm *VM, id int) (*VCPU, error) {
 	}
 
 	// FIX: cloexec?
-	return &VCPU{os.NewFile(fd, fmt.Sprintf("vcpu-%d", id))}, nil
+	return &VCPU{File: os.NewFile(fd, fmt.Sprintf("vcpu-%d", id)), vm: vm}, nil
 }
 
 // Run runs the given vcpu. It returns EINTR if "an unmasked signal is pending".

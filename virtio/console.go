@@ -15,8 +15,11 @@ type ConsoleDevice struct {
 }
 
 type consoleHandler struct {
-	cfg ConsoleDevice
-	wg  sync.WaitGroup
+	cfg     ConsoleDevice
+	wg      sync.WaitGroup
+	stop    chan struct{}
+	once    sync.Once
+	pending []byte // accessed only under the queue gate
 }
 
 const (
@@ -25,7 +28,7 @@ const (
 )
 
 func (cfg ConsoleDevice) NewHandler() (DeviceHandler, error) {
-	return &consoleHandler{cfg: cfg}, nil
+	return &consoleHandler{cfg: cfg, stop: make(chan struct{})}, nil
 }
 
 func (h *consoleHandler) GetType() DeviceID {
@@ -47,14 +50,7 @@ func (h *consoleHandler) QueueReady(num int, q *virtq.Queue, notify <-chan struc
 			h.wg.Add(1)
 			go func() {
 				defer h.wg.Done()
-				for range notify {
-					if err := h.handleRx(q); err != nil {
-						if err == io.EOF {
-							return
-						}
-						slog.Error("console rx", "err", err)
-					}
-				}
+				h.runRx(q, notify)
 			}()
 		}
 
@@ -83,12 +79,90 @@ func (h *consoleHandler) ReadConfig(p []byte, off int) error {
 }
 
 func (h *consoleHandler) Close() error {
+	h.once.Do(func() { close(h.stop) })
 	h.wg.Wait()
 	return nil
 }
 
 func (h *consoleHandler) handleRx(q *virtq.Queue) error {
+	// Read only into host-owned memory, never into a claimed guest chain.
+	if len(h.pending) == 0 {
+		buf := make([]byte, 4096)
+		n, err := h.cfg.In.Read(buf)
+		if n == 0 {
+			return err
+		}
+		return q.WithAccess(func() error {
+			h.pending = append(h.pending, buf[:n]...)
+			return h.drainRx(q)
+		})
+	}
+	return q.WithAccess(func() error { return h.drainRx(q) })
+}
+
+func (h *consoleHandler) runRx(q *virtq.Queue, notify <-chan struct{}) {
+	reads := make(chan []byte)
+	// An arbitrary io.Reader cannot be interrupted. If it blocks forever this
+	// helper may remain, but it owns no guest memory and does not delay Close.
+	go func() {
+		defer close(reads)
+		for {
+			buf := make([]byte, 4096)
+			n, err := h.cfg.In.Read(buf)
+			select {
+			case reads <- buf[:n]:
+			case <-h.stop:
+				return
+			}
+			if err != nil {
+				if err != io.EOF {
+					slog.Error("console input", "err", err)
+				}
+				return
+			}
+		}
+	}()
 	for {
+		// Apply backpressure rather than losing input when the guest is full.
+		var source <-chan []byte
+		_ = q.WithAccess(func() error {
+			if len(h.pending) == 0 {
+				source = reads
+			}
+			return nil
+		})
+		select {
+		case <-h.stop:
+			return
+		case _, ok := <-notify:
+			if !ok {
+				return
+			}
+		case in, ok := <-source:
+			if !ok {
+				return
+			}
+			_ = q.WithAccess(func() error {
+				h.pending = append(h.pending, in...)
+				return nil
+			})
+		}
+		if err := q.WithAccess(func() error { return h.drainRx(q) }); err != nil {
+			slog.Error("console rx", "err", err)
+			return
+		}
+	}
+}
+
+func (h *consoleHandler) SnapshotHandlerState() []byte { return append([]byte(nil), h.pending...) }
+func (*consoleHandler) ValidateHandlerState([]byte) error { return nil }
+func (h *consoleHandler) RestoreHandlerState(s []byte) error {
+	h.pending = append([]byte(nil), s...)
+	return nil
+}
+
+func (h *consoleHandler) drainRx(q *virtq.Queue) error {
+	for len(h.pending) > 0 {
 		c, err := q.Next()
 		if err != nil {
 			return err
@@ -109,12 +183,9 @@ func (h *consoleHandler) handleRx(q *virtq.Queue) error {
 				return gbe
 			}
 
-			n, err = h.readConsoleInput(buf)
-			break
-		}
-
-		if err != nil && err != io.EOF {
-			return err
+			copied := copy(buf, h.pending)
+			h.pending = h.pending[copied:]
+			n += copied
 		}
 
 		if err := c.Release(n); err != nil {
@@ -125,14 +196,11 @@ func (h *consoleHandler) handleRx(q *virtq.Queue) error {
 	return nil
 }
 
-func (h *consoleHandler) readConsoleInput(buf []byte) (int, error) {
-	if len(buf) == 0 {
-		return 0, nil
-	}
-	return h.cfg.In.Read(buf)
+func (h *consoleHandler) handleTx(q *virtq.Queue) error {
+	return q.WithAccess(func() error { return h.drainTx(q) })
 }
 
-func (h *consoleHandler) handleTx(q *virtq.Queue) error {
+func (h *consoleHandler) drainTx(q *virtq.Queue) error {
 	for {
 		c, err := q.Next()
 		if err != nil {

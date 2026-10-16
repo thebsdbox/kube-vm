@@ -1,7 +1,9 @@
 package kubevm
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"net"
@@ -15,6 +17,40 @@ import (
 	"kube-vm/virtio"
 	"kube-vm/vmm"
 )
+
+func writeLegacyCheckpoint(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legacy.snap")
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&vmm.VMSnapshot{Magic: "kube-vm-snapshot-v1", Version: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil { t.Fatal(err) }
+	return path
+}
+
+func TestRestoreInvalidCheckpointPreservesExistingVM(t *testing.T) {
+	vm := &vmController{uid: "existing", vm: &vmm.VM{}}
+	s := &vmServer{ctx: context.Background(), vms: map[string]*vmController{"existing": vm}}
+	if err := s.Restore("existing", writeLegacyCheckpoint(t)); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("restore invalid checkpoint: %v", err)
+	}
+	if s.vms["existing"] != vm || vm.vm == nil || vm.shuttingDown {
+		t.Fatal("invalid checkpoint changed or stopped the existing VM")
+	}
+}
+
+func TestSnapshotStartDoesNotNormalizeOrdinaryBaseDisk(t *testing.T) {
+	s := &vmServer{ctx: context.Background()}
+	_, err := s.Start("resumed", map[string]any{
+		"snapshot": writeLegacyCheckpoint(t), "base_disk": "missing-base-image",
+		"kernel": "/missing/kernel", "mem": 8192, "cpu": 8,
+	})
+	if err == nil || !strings.Contains(err.Error(), "snapshot version") {
+		t.Fatalf("snapshot boot should validate checkpoint, not ordinary boot defaults: %v", err)
+	}
+	if len(s.vms) != 0 { t.Fatal("failed snapshot boot registered a VM") }
+}
 
 func TestVMStorageStatsSnapshotAndDetails(t *testing.T) {
 	c := &vmController{uid: "diskvm", storage: []*virtio.BlockMetrics{

@@ -46,6 +46,7 @@ type Options struct {
 	WebToken      string
 	ServerMode    bool
 	BlockSpecs    []string
+	SnapshotPath  string
 }
 
 func DefaultOptions() Options {
@@ -149,6 +150,7 @@ func Run(ctx context.Context, opts Options) error {
 func runLocalVM(ctx context.Context, opts Options) error {
 	cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
 		UID:           "local",
+		SnapshotPath:  opts.SnapshotPath,
 		FirmwarePath:  opts.FirmwarePath,
 		KernelPath:    opts.KernelPath,
 		InitrdPath:    opts.InitrdPath,
@@ -183,6 +185,7 @@ func runLocalVM(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	defer m.Close()
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		old, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -273,9 +276,11 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		payload = map[string]any{}
 	}
 	logVM(uid, "start", "request payload keys=%v", sortedPayloadKeys(payload))
-	if err := normalizeBaseDiskPayload(uid, payload); err != nil {
-		logVM(uid, "start", "base disk normalization failed: %v", err)
-		return "", err
+	if asString(payload, "snapshot", "") == "" {
+		if err := normalizeBaseDiskPayload(uid, payload); err != nil {
+			logVM(uid, "start", "base disk normalization failed: %v", err)
+			return "", err
+		}
 	}
 
 	s.mu.Lock()
@@ -296,6 +301,7 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		cancel:         cancel,
 		consoleSession: consoleSession,
 		uid:            uid,
+		runDone:        make(chan struct{}),
 		startedAt:      time.Now(),
 		memMiB:         asInt(payload, "mem", 1024),
 		numCPU:         asInt(payload, "cpu", 1),
@@ -320,6 +326,7 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	logVM(uid, "start", "building VM configuration")
 	cfg, netCfg, err := vmconfig.Build(vmconfig.Options{
 		UID:           uid,
+		SnapshotPath:  asString(payload, "snapshot", ""),
 		FirmwarePath:  asString(payload, "firmware", ""),
 		KernelPath:    asString(payload, "kernel", "bzImage"),
 		InitrdPath:    asString(payload, "initrd", ""),
@@ -339,8 +346,17 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	})
 	if err != nil {
 		logVM(uid, "start", "config build failed: %v", err)
+		cancel()
+		consoleSession.SetOnClose(nil)
+		_ = consoleSession.Close()
 		return "", err
 	}
+	// Snapshot hardware and disk copies replace CLI/form defaults.
+	vmc.memMiB, vmc.numCPU = cfg.MemSize>>20, cfg.NumCPU
+	vmc.firmware, vmc.kernel, vmc.initrd = cfg.SnapshotConfig.FirmwarePath, cfg.SnapshotConfig.KernelPath, cfg.SnapshotConfig.InitrdPath
+	vmc.iso, vmc.cmdline, vmc.serialConsole = cfg.SnapshotConfig.ISOPath, cfg.SnapshotConfig.Cmdline, cfg.SnapshotConfig.SerialConsole
+	vmc.tap, vmc.nat, vmc.vhost = cfg.SnapshotConfig.TapName, cfg.SnapshotConfig.NATMode, cfg.SnapshotConfig.VhostNet
+	vmc.block = append([]string(nil), cfg.SnapshotConfig.BlockSpecs...)
 	if netCfg.TapName != "" {
 		vmc.tap = netCfg.TapName
 	}
@@ -368,17 +384,6 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 		logVM(uid, "start", "VMM create failed: %v", err)
 		return "", fmt.Errorf("vm: start failed: %w", err)
 	}
-	if snap := asString(payload, "snapshot", ""); snap != "" {
-		logVM(uid, "start", "restoring snapshot %q", snap)
-		if err := m.RestoreState(snap); err != nil {
-			_ = m.Close()
-			return "", fmt.Errorf("vm: restore snapshot failed: %w", err)
-		}
-		if err := m.Resume(); err != nil {
-			_ = m.Close()
-			return "", fmt.Errorf("vm: resume from snapshot failed: %w", err)
-		}
-	}
 	logVM(uid, "start", "VMM instance created")
 
 	vmc.vm = m
@@ -401,6 +406,7 @@ func (s *vmServer) Start(uid string, payload map[string]any) (string, error) {
 	}
 
 	go func() {
+		defer close(vmc.runDone)
 		defer func() {
 			logVM(uid, "cleanup", "run goroutine cleanup begin")
 			if vmc.isClosed() {
@@ -478,13 +484,37 @@ func (s *vmServer) Save(uid, path string) error {
 }
 
 func (s *vmServer) Restore(uid, path string) error {
+	state, err := vmm.ReadSnapshot(path)
+	if err != nil {
+		return err
+	}
+	// Reject missing/corrupt/old checkpoints before stopping a running VM.
+	if err := vmconfig.ValidateSnapshotAssets(path, state); err != nil {
+		return err
+	}
+	if err := state.ValidateHost(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	vm, ok := s.vms[uid]
 	s.mu.Unlock()
 	if !ok || vm == nil || vm.vm == nil {
 		return errors.New("vm: instance is not running")
 	}
-	return vm.vm.RestoreState(path)
+	if err := s.Shutdown(uid); err != nil {
+		return fmt.Errorf("stop VM before checkpoint restore: %w", err)
+	}
+	if vm.runDone != nil {
+		select {
+		case <-vm.runDone:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		case <-time.After(10 * time.Second):
+			return errors.New("timed out waiting for old VM cleanup; checkpoint is unchanged")
+		}
+	}
+	_, err = s.Start(uid, map[string]any{"snapshot": path})
+	return err
 }
 
 func (s *vmServer) Shutdown(uid string) error {
@@ -599,6 +629,7 @@ type vmController struct {
 	consoleSession *control.ConsoleSession
 	vm             *vmm.VM
 	shuttingDown   bool
+	runDone        chan struct{}
 }
 
 type vmStats struct {

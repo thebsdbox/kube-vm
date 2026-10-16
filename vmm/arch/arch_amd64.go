@@ -91,6 +91,8 @@ func (a *Arch) SetupVCPU(slot int, vcpu *kvm.VCPU, state *kvm.VCPUState) error {
 	for _, e := range a.supportedCPUID {
 		switch e.Function {
 		case 1:
+			// Nested virtualization state is not part of portable checkpoints.
+			e.ECX &^= 1 << 5 // VMX
 			// Update only the initial APIC ID field (EBX[31:24]).
 			e.EBX &^= uint32(0xff << 24)
 			e.EBX |= uint32(slot&0xff) << 24
@@ -116,6 +118,19 @@ func (a *Arch) SetupVCPU(slot int, vcpu *kvm.VCPU, state *kvm.VCPUState) error {
 		// AMD extended topology leaf: EAX is the extended APIC ID.
 		case 0x8000001e:
 			e.EAX = uint32(slot)
+
+		case 0x80000001:
+			e.ECX &^= 1 << 2 // SVM
+
+		case 0x0d:
+			// KVM exports the standard user XSAVE layout. Do not advertise
+			// supervisor components/nested XSAVES state we cannot migrate.
+			if e.Index == 1 {
+				e.EAX &^= 1 << 3 // XSAVES/XRSTORS
+				e.ECX, e.EDX = 0, 0
+			} else if e.Index >= 2 && e.ECX&1 != 0 {
+				continue
+			}
 
 		// 	Clear X86_FEATURE_EPB
 		// https://github.com/torvalds/linux/blob/master/Documentation/admin-guide/pm/intel_epb.rst

@@ -3,6 +3,8 @@ package virtq_test
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"kube-vm/virtio/virtq"
@@ -16,6 +18,93 @@ var (
 var nopConfig = virtq.Config{
 	MemAt:  nopMemAt,
 	Notify: nopNotify,
+}
+
+func TestQueueCursorSnapshotAcrossWrap(t *testing.T) {
+	ring := make([]virtq.Desc, 4)
+	q := virtq.New(ring, nil, nil, virtq.Config{})
+	index, wrap := 0, true
+	for request := 0; request < 20; request++ {
+		count := 1 + request%3
+		for i := 0; i < count; i++ {
+			flags := uint16(virtq.DescFUsed)
+			if wrap {
+				flags = virtq.DescFAvail
+			}
+			if i+1 < count {
+				flags |= virtq.DescFNext
+			}
+			ring[index] = virtq.Desc{ID: uint16(request), Flags: flags}
+			index++
+			if index == len(ring) {
+				index = 0
+				wrap = !wrap
+			}
+		}
+		chain, err := q.Next()
+		if err != nil || chain == nil {
+			t.Fatalf("Next: %v, %v", chain, err)
+		}
+		if err := chain.Release(0); err != nil {
+			t.Fatal(err)
+		}
+		state := q.Snapshot()
+		if state.AvailIndex != uint16(index) || state.AvailWrap != wrap {
+			t.Fatalf("bad cursor: %+v", state)
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded virtq.QueueState
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		q = virtq.New(ring, nil, nil, virtq.Config{})
+		if err := q.RestoreState(decoded); err != nil {
+			t.Fatal(err)
+		}
+		if q.Snapshot() != state {
+			t.Fatal("cursor roundtrip mismatch")
+		}
+		if c, err := q.Next(); c != nil || err != nil {
+			t.Fatalf("replayed completed chain: %v, %v", c, err)
+		}
+	}
+}
+
+func TestQueueRestoreRejectsInvalidCursors(t *testing.T) {
+	q := virtq.New(make([]virtq.Desc, 4), nil, nil, virtq.Config{})
+	for _, state := range []virtq.QueueState{
+		{AvailIndex: 4, UsedIndex: 4},
+		{AvailIndex: 1, UsedIndex: 0},
+		{AvailWrap: true, UsedWrap: false},
+	} {
+		if err := q.RestoreState(state); err == nil {
+			t.Fatalf("accepted %+v", state)
+		}
+	}
+}
+
+func TestQueueWithAccessReleasesOnError(t *testing.T) {
+	held := false
+	q := virtq.New(nil, nil, nil, virtq.Config{BeginAccess: func() func() {
+		held = true
+		return func() { held = false }
+	}})
+	want := errors.New("operation failed")
+	err := q.WithAccess(func() error {
+		if !held {
+			t.Fatal("operation not gated")
+		}
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("operation error lost: %v", err)
+	}
+	if held {
+		t.Fatal("gate not released")
+	}
 }
 
 func TestPackedQueueRepeatedWrappedChains(t *testing.T) {

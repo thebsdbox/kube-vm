@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -48,6 +47,9 @@ type Config struct {
 
 	// SnapshotConfig records launch metadata that should be embedded in snapshots.
 	SnapshotConfig SnapshotConfig
+
+	// Snapshot boots from saved hardware/memory/device state instead of Loader.
+	Snapshot *VMSnapshot
 
 	// SerialIn and SerialOut configure an optional COM1/ttyS0 serial console.
 	// When nil, no userspace serial device is attached.
@@ -111,6 +113,7 @@ type VM struct {
 	pciConfigAddr uint32
 
 	snapshotConfig SnapshotConfig
+	snapshotMu     sync.Mutex
 
 	mu        sync.Mutex
 	doneC     chan struct{}
@@ -118,6 +121,8 @@ type VM struct {
 	pauseCond *sync.Cond
 	paused    bool
 	pausedCPU int
+	running   bool
+	runExited bool
 }
 
 const (
@@ -151,6 +156,8 @@ const snapshotMagic = "kube-vm-snapshot-v1"
 
 // SnapshotConfig captures the launch metadata stored alongside VM state.
 type SnapshotConfig struct {
+	UID           string
+	NetworkUID    string
 	MemSize       int
 	NumCPU        int
 	FirmwarePath  string
@@ -365,7 +372,7 @@ func New(cfg Config) (*VM, error) {
 
 	m.mmio, err = mmio.NewBus(cfg.Devices, mmio.Config{
 		MemAt: func(addr uint64, len int) ([]byte, error) {
-			return m.mem[addr : addr+uint64(len)], nil
+			return m.memoryAt(addr, len)
 		},
 
 		Notify: func(irq int) error {
@@ -409,6 +416,13 @@ func New(cfg Config) (*VM, error) {
 	}
 
 	// load memory
+	if cfg.Snapshot != nil {
+		if err := m.restoreSnapshot(cfg.Snapshot); err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("restore snapshot: %w", err)
+		}
+		return m, nil
+	}
 	if err := cfg.Loader.LoadMemory(info, m.mem); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLoadMemory, err)
 	}
@@ -454,6 +468,23 @@ func New(cfg Config) (*VM, error) {
 
 func (m *VM) Run(ctx context.Context) error {
 	vmLogf(m, "run", "enter")
+	m.snapshotMu.Lock()
+	m.pauseMu.Lock()
+	if m.running || m.runExited {
+		m.pauseMu.Unlock()
+		m.snapshotMu.Unlock()
+		return errors.New("vmm: VM is already running")
+	}
+	m.running = true
+	m.pauseMu.Unlock()
+	m.snapshotMu.Unlock()
+	defer func() {
+		m.pauseMu.Lock()
+		m.running = false
+		m.runExited = true
+		m.pauseCond.Broadcast()
+		m.pauseMu.Unlock()
+	}()
 	select {
 	case <-m.doneC:
 		vmLogf(m, "run", "already closed before start")
@@ -487,6 +518,7 @@ func (m *VM) Run(ctx context.Context) error {
 	}
 
 	runVCPU := func(slot int, c *vcpu) error {
+		pendingIO := false
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -498,9 +530,15 @@ func (m *VM) Run(ctx context.Context) error {
 			default:
 			}
 
-			m.waitIfPaused()
+			// KVM completes userspace IO/MMIO on the next KVM_RUN, before
+			// honoring ImmediateExit. Do not snapshot mid-instruction.
+			if !pendingIO {
+				m.waitIfPaused()
+			}
 
-			if err := kvm.Run(c.fd); err != nil {
+			err := kvm.Run(c.fd)
+			pendingIO = false
+			if err != nil {
 				if err == unix.EINTR || err == unix.EAGAIN {
 					if ctx.Err() != nil {
 						return ctx.Err()
@@ -523,8 +561,6 @@ func (m *VM) Run(ctx context.Context) error {
 				return fmt.Errorf("run vcpu: %w", err)
 			}
 
-			m.waitIfPaused()
-
 			state := c.State()
 
 			switch state.ExitReason {
@@ -538,6 +574,7 @@ func (m *VM) Run(ctx context.Context) error {
 				if err := m.handleIO(xd, c.mm[dataStart:dataStart+dataLen]); err != nil {
 					return fmt.Errorf("vcpu io: %w", err)
 				}
+				pendingIO = true
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -565,6 +602,7 @@ func (m *VM) Run(ctx context.Context) error {
 				if _, err := m.mmio.HandleMMIO(xd.PhysAddr, xd.Data[:xd.Len], xd.IsWrite); err != nil {
 					return fmt.Errorf("vcpu mmio: %w", err)
 				}
+				pendingIO = true
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -625,6 +663,8 @@ func (m *VM) Run(ctx context.Context) error {
 // it closes the MMIO bus, which closes each of its devices in turn. Then the
 // underlying VM fd is closed and the VM's memory is munmaped.
 func (m *VM) Close() error {
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
 	vmLogf(m, "close", "begin")
 	m.mu.Lock()
 	select {
@@ -638,6 +678,12 @@ func (m *VM) Close() error {
 		vmLogf(m, "close", "signaled immediate exit and closed done channel")
 	}
 	m.mu.Unlock()
+	m.pauseMu.Lock()
+	m.paused = false
+	if m.pauseCond != nil {
+		m.pauseCond.Broadcast()
+	}
+	m.pauseMu.Unlock()
 
 	var (
 		firstErr error
@@ -666,7 +712,7 @@ func (m *VM) Close() error {
 		}
 		// Force KVM_RUN to unblock even if the VCPU worker is still inside op.F.
 		if c.fd != nil {
-			if err := c.fd.Close(); err != nil {
+			if err := c.fd.Close(); err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, unix.EBADF) {
 				if !hasErr {
 					firstErr = fmt.Errorf("close vcpu fd: %w", err)
 					hasErr = true
@@ -823,6 +869,7 @@ type VMSnapshotCPU struct {
 	Sregs kvm.Sregs
 	FPU   kvm.FPU
 	MP    kvm.MPState
+	Hardware *kvm.CPUState
 }
 
 type VMSnapshot struct {
@@ -833,6 +880,12 @@ type VMSnapshot struct {
 	Mem         []byte
 	CPU         []VMSnapshotCPU
 	DeviceState []mmio.DeviceState
+	Architecture string
+	Hardware     *kvm.VMState
+	StorageDir   string
+	Storage      []mmio.StorageState
+	Serial       *SerialState
+	PCIConfigAddr uint32
 }
 
 // ReadSnapshot decodes a snapshot file, transparently supporting both legacy
@@ -872,6 +925,11 @@ func decodeSnapshot(r io.Reader) (*VMSnapshot, error) {
 	if err := gob.NewDecoder(decodeR).Decode(&state); err != nil {
 		return nil, err
 	}
+	// gzip.Close does not verify an unread trailer. Drain to validate CRC and
+	// truncation even when gob decoded its value before the compressed EOF.
+	if _, err := io.Copy(io.Discard, decodeR); err != nil {
+		return nil, err
+	}
 	if state.Magic != snapshotMagic {
 		return nil, fmt.Errorf("snapshot magic mismatch: %q", state.Magic)
 	}
@@ -886,9 +944,21 @@ func (m *VM) Pause() error {
 	if m == nil {
 		return ErrVMClosed
 	}
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
+	return m.pause()
+}
+
+func (m *VM) pause() error {
+	if m == nil || isShutdown(m.doneC) {
+		return ErrVMClosed
+	}
 
 	m.pauseMu.Lock()
 	if m.paused {
+		for m.running && m.pausedCPU < len(m.cpu) {
+			m.pauseCond.Wait()
+		}
 		m.pauseMu.Unlock()
 		return nil
 	}
@@ -900,7 +970,7 @@ func (m *VM) Pause() error {
 	m.mu.Unlock()
 
 	m.pauseMu.Lock()
-	for m.pausedCPU < len(m.cpu) {
+	for m.running && m.pausedCPU < len(m.cpu) {
 		m.pauseCond.Wait()
 	}
 	m.pauseMu.Unlock()
@@ -908,6 +978,15 @@ func (m *VM) Pause() error {
 }
 
 func (m *VM) Resume() error {
+	if m == nil {
+		return ErrVMClosed
+	}
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
+	return m.resume()
+}
+
+func (m *VM) resume() error {
 	if m == nil {
 		return ErrVMClosed
 	}
@@ -951,150 +1030,26 @@ func (m *VM) waitIfPaused() {
 	m.pauseMu.Unlock()
 }
 
-func (m *VM) SaveState(path string) (err error) {
+func (m *VM) SaveState(path string) error {
 	if m == nil {
 		return ErrVMClosed
 	}
-
-	// Check if the VM is shutting down
-	m.mu.Lock()
-	select {
-	case <-m.doneC:
-		m.mu.Unlock()
-		return ErrVMClosed
-	default:
-		m.mu.Unlock()
-	}
-
-	m.pauseMu.Lock()
-	wasPaused := m.paused
-	m.pauseMu.Unlock()
-
-	if err := m.Pause(); err != nil {
-		return err
-	}
-	if !wasPaused {
-		defer func() {
-			resumeErr := m.Resume()
-			if err == nil {
-				err = resumeErr
-			}
-		}()
-	}
-
-	state := &VMSnapshot{
-		Magic:     snapshotMagic,
-		Version:   2,
-		CreatedAt: time.Now().UTC(),
-		Config:    m.snapshotConfig.withVMDefaults(len(m.mem), len(m.cpu)),
-		Mem:       append([]byte(nil), m.mem...),
-		CPU:       make([]VMSnapshotCPU, len(m.cpu)),
-	}
-	for i, c := range m.cpu {
-		if c == nil || c.fd == nil {
-			continue
-		}
-		// Skip if file descriptor is invalid (e.g., during shutdown)
-		if int(c.fd.Fd()) < 0 {
-			continue
-		}
-		var regs kvm.Regs
-		if err := kvm.GetRegs(c.fd, &regs); err != nil {
-			return fmt.Errorf("save regs vcpu %d: %w", i, err)
-		}
-		var sregs kvm.Sregs
-		if err := kvm.GetSregs(c.fd, &sregs); err != nil {
-			return fmt.Errorf("save sregs vcpu %d: %w", i, err)
-		}
-		var fpu kvm.FPU
-		if err := kvm.GetFPU(c.fd, &fpu); err != nil {
-			return fmt.Errorf("save fpu vcpu %d: %w", i, err)
-		}
-		var mp kvm.MPState
-		if err := kvm.GetMPState(c.fd, &mp); err != nil {
-			return fmt.Errorf("save mp vcpu %d: %w", i, err)
-		}
-		state.CPU[i] = VMSnapshotCPU{Regs: regs, Sregs: sregs, FPU: fpu, MP: mp}
-	}
-
-	if m.mmio != nil {
-		state.DeviceState = m.mmio.ExportDeviceState()
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create snapshot temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	keep := false
-	defer func() {
-		_ = tmp.Close()
-		if !keep {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	gz := gzip.NewWriter(tmp)
-	if err := gob.NewEncoder(gz).Encode(state); err != nil {
-		_ = gz.Close()
-		return fmt.Errorf("encode snapshot: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("compress snapshot: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("flush snapshot: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("write snapshot: %w", err)
-	}
-	keep = true
-	return nil
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
+	return m.saveSnapshot(path)
 }
 
 func (m *VM) RestoreState(path string) error {
 	if m == nil {
 		return ErrVMClosed
 	}
-
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
 	state, err := ReadSnapshot(path)
 	if err != nil {
 		return err
 	}
-	if len(state.Mem) != len(m.mem) {
-		return fmt.Errorf("snapshot memory size mismatch: got %d want %d", len(state.Mem), len(m.mem))
-	}
-	copy(m.mem, state.Mem)
-
-	for i, c := range m.cpu {
-		if c == nil || c.fd == nil {
-			continue
-		}
-		if i >= len(state.CPU) {
-			return fmt.Errorf("snapshot cpu count mismatch: got %d want %d", len(state.CPU), len(m.cpu))
-		}
-		cpu := state.CPU[i]
-		if err := kvm.SetRegs(c.fd, &cpu.Regs); err != nil {
-			return fmt.Errorf("restore regs vcpu %d: %w", i, err)
-		}
-		if err := kvm.SetSregs(c.fd, &cpu.Sregs); err != nil {
-			return fmt.Errorf("restore sregs vcpu %d: %w", i, err)
-		}
-		if err := kvm.SetFPU(c.fd, &cpu.FPU); err != nil {
-			return fmt.Errorf("restore fpu vcpu %d: %w", i, err)
-		}
-		if err := kvm.SetMPState(c.fd, &cpu.MP); err != nil {
-			return fmt.Errorf("restore mp vcpu %d: %w", i, err)
-		}
-	}
-
-	if m.mmio != nil && len(state.DeviceState) > 0 {
-		if err := m.mmio.RestoreDeviceState(state.DeviceState); err != nil {
-			return fmt.Errorf("restore device state: %w", err)
-		}
-	}
-
-	return m.Resume()
+	return m.restoreSnapshot(state)
 }
 
 func (m *VM) ThreadIDs() []int {
@@ -1168,8 +1123,13 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("memory is too large: %d > %d", cfg.MemSize, MemSizeMax)
 	}
 
-	if cfg.Loader == nil {
+	if cfg.Loader == nil && cfg.Snapshot == nil {
 		return errors.New("loader is not set")
+	}
+	if cfg.Snapshot != nil {
+		if err := cfg.Snapshot.ValidateRestore(); err != nil {
+			return err
+		}
 	}
 
 	return nil

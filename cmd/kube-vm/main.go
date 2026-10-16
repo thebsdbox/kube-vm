@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&opts.KernelPath, "kernel", opts.KernelPath, "load bzImage from file or URL")
 	flag.StringVar(&opts.InitrdPath, "initrd", opts.InitrdPath, "load initial ramdisk from file or URL")
 	flag.StringVar(&opts.ISOPath, "iso", opts.ISOPath, "attach ISO image from file or URL as read-only block device")
+	flag.StringVar(&opts.SnapshotPath, "snapshot", "", "resume a saved checkpoint and its sibling disk directory (no kernel/initrd required)")
 	flag.StringVar(&opts.Cmdline, "cmdline", opts.Cmdline, "set the kernel command line")
 	flag.BoolVar(&opts.SerialConsole, "serial-console", opts.SerialConsole, "attach a COM1 serial console and switch the stock cmdline to ttyS0 unless --cmdline overrides it")
 	flag.StringVar(&opts.TapName, "tap", opts.TapName, "attach a virtio-net device backed by TAP (optional name)")

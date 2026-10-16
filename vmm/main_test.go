@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -38,6 +41,10 @@ var (
 var kernelBytes []byte
 var initrdBytes []byte
 
+var guestImageOnce sync.Once
+var guestImageErr error
+var guestImageSkip string
+
 func TestMain(m *testing.M) {
 	if isGuest {
 		m.Run()
@@ -50,15 +57,33 @@ func TestMain(m *testing.M) {
 		if err := unix.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
 			panic(err)
 		}
-
+		return
 	}
 
+	// Unit tests must not require a kernel, KVM, or a recursive guest build.
+	os.Exit(m.Run())
+}
+
+func prepareGuestImage() {
 	kb, err := os.ReadFile("../bzImage")
 	if err != nil {
-		panic(err)
+		if errors.Is(err, os.ErrNotExist) {
+			guestImageSkip = fmt.Sprintf("guest tests require ../bzImage: %v", err)
+		} else {
+			guestImageErr = fmt.Errorf("read guest kernel: %w", err)
+		}
+		return
 	}
 
 	kernelBytes = kb
+	if _, err := exec.LookPath("go"); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			guestImageSkip = fmt.Sprintf("guest tests require the Go toolchain: %v", err)
+		} else {
+			guestImageErr = err
+		}
+		return
+	}
 
 	// build static test exe
 	exe := new(bytes.Buffer)
@@ -67,9 +92,11 @@ func TestMain(m *testing.M) {
 		"-ldflags", "-X kube-vm/vmm_test.guest=guest", ".")
 	build.Stdout = exe
 	build.Stderr = os.Stderr
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 
 	if err := build.Run(); err != nil {
-		panic(err)
+		guestImageErr = fmt.Errorf("build guest test binary: %w", err)
+		return
 	}
 
 	// generate initrd
@@ -84,24 +111,56 @@ func TestMain(m *testing.M) {
 	})
 
 	if err != nil {
-		panic(err)
+		guestImageErr = fmt.Errorf("write initrd header: %w", err)
+		return
 	}
 
 	if _, err := cw.Write(exe.Bytes()); err != nil {
-		panic(err)
+		guestImageErr = fmt.Errorf("write initrd executable: %w", err)
+		return
 	}
 
 	if err := cw.Close(); err != nil {
-		panic(err)
+		guestImageErr = fmt.Errorf("close initrd archive: %w", err)
+		return
 	}
 
 	if err := zw.Close(); err != nil {
-		panic(err)
+		guestImageErr = fmt.Errorf("close initrd gzip: %w", err)
+		return
 	}
 
 	initrdBytes = ib.Bytes()
+}
 
-	os.Exit(m.Run())
+// requireKVM only skips known host prerequisites. In particular, errors from
+// creating/configuring/running a VM are test failures, not reasons to skip.
+func requireKVM(t *testing.T) {
+	t.Helper()
+	f, err := os.Open("/dev/kvm")
+	if err != nil {
+		for _, unavailable := range []error{
+			os.ErrNotExist, os.ErrPermission, unix.ENODEV, unix.ENXIO, unix.ENOSYS,
+		} {
+			if errors.Is(err, unavailable) {
+				t.Skipf("requires accessible /dev/kvm: %v", err)
+			}
+		}
+		t.Fatalf("probe /dev/kvm: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close /dev/kvm probe: %v", err)
+	}
+}
+
+// testing splits -test.run at slashes; anchor and quote each component so a
+// guest cannot accidentally run sibling tests (or interpret name metacharacters).
+func guestTestPattern(name string) string {
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(part) + "$"
+	}
+	return strings.Join(parts, "/")
 }
 
 func (gt GuestTest) Run(t *testing.T) {
@@ -110,6 +169,14 @@ func (gt GuestTest) Run(t *testing.T) {
 	switch {
 	case isHost:
 		t.Run("host", func(tt *testing.T) {
+			requireKVM(tt)
+			guestImageOnce.Do(prepareGuestImage)
+			if guestImageSkip != "" {
+				tt.Skip(guestImageSkip)
+			}
+			if guestImageErr != nil {
+				tt.Fatal(guestImageErr)
+			}
 			gt.Host(tt, func(cfg vmm.Config) {
 				runGuest(tt, t.Name()+"/guest", cfg)
 			})
@@ -154,7 +221,7 @@ func runGuest(t *testing.T, testName string, cfg vmm.Config) {
 	cfg.Loader = &linux.Loader{
 		Kernel:  kernelBytes,
 		Initrd:  initrdBytes,
-		Cmdline: fmt.Sprintf("reboot=t console=hvc0 -- -test.v -test.run=^%s$", testName),
+		Cmdline: fmt.Sprintf("reboot=t console=hvc0 -- -test.v -test.run=%s", guestTestPattern(testName)),
 	}
 
 	m, err := vmm.New(cfg)
@@ -171,6 +238,6 @@ func runGuest(t *testing.T, testName string, cfg vmm.Config) {
 	}
 
 	if !strings.Contains(out.String(), "\r\nPASS\r\n") {
-		t.FailNow()
+		t.Fatalf("guest did not report PASS; console output:\n%s", out.String())
 	}
 }

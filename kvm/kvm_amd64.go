@@ -157,47 +157,10 @@ type MMIOExitData struct {
 	_        [3]byte
 }
 
-// kvm_msr_list is similar to the C struct kvm_msr_list, which is used by the
-// KVM_GET_MSR_INDEX_LIST and KVM_GET_MSR_FEATURE_INDEX_LIST ioctls. The indices array has
-// a fixed size because Go doesn't directly support C flexible array members.
-type kvm_msr_list struct {
-	nmsrs   uint32
-	indices [255]uint32
-}
-
-// kvm_msrs is similar to the C struct kvm_msrs, which is used by the KVM_GET_MSRS and
-// KVM_SET_MSRS ioctls. The entries array has a fixed size because Go doesn't directly
-// support C flexible array members.
-type kvm_msrs struct {
-	nmsrs   uint32
-	entries [255]MSREntry
-	_       uint32
-}
-
-// kvm_cpuid2 is similar to the C struct kvm_cpuid2.
-type kvm_cpuid2 struct {
-	nent    uint32
-	_       uint32
-	entries [255]CPUIDEntry2
-}
-
 // GetMSRIndexList "returns the guest msrs that are supported. The list
 // varies by kvm version and host processor, but does not change otherwise."
 func GetMSRIndexList(sys *os.File) (indices []int, err error) {
-	var l kvm_msr_list
-	l.nmsrs = uint32(len(l.indices))
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, sys.Fd(), kGetMSRIndexList, uintptr(unsafe.Pointer(&l)))
-	if errno != 0 {
-		return nil, errno
-	}
-
-	indices = make([]int, l.nmsrs)
-	for i := range indices {
-		indices[i] = int(l.indices[i])
-	}
-
-	return
+	return getMSRIndices(sys, kGetMSRIndexList)
 }
 
 // GetMSRFeatureIndexList "returns the list of MSRs that can be passed to the KVM_GET_MSRS
@@ -207,20 +170,7 @@ func GetMSRIndexList(sys *os.File) (indices []int, err error) {
 //
 // This ioctl is available if CheckExtension(CapGetMSRFeatures) returns 1.
 func GetMSRFeatureIndexList(sys *os.File) (indices []int, err error) {
-	var l kvm_msr_list
-	l.nmsrs = uint32(len(l.indices))
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, sys.Fd(), kGetMSRFeatureIndexList, uintptr(unsafe.Pointer(&l)))
-	if errno != 0 {
-		return nil, errno
-	}
-
-	indices = make([]int, l.nmsrs)
-	for i := range indices {
-		indices[i] = int(l.indices[i])
-	}
-
-	return
+	return getMSRIndices(sys, kGetMSRFeatureIndexList)
 }
 
 // GetSupportedCPUID "returns x86 cpuid features which are supported by both the hardware
@@ -234,15 +184,7 @@ func GetMSRFeatureIndexList(sys *os.File) (indices []int, err error) {
 //
 // This ioctl is available if CheckExtension(CapExtCPUID) returns 1.
 func GetSupportedCPUID(sys *os.File) ([]CPUIDEntry2, error) {
-	var cpuid kvm_cpuid2
-	cpuid.nent = uint32(len(cpuid.entries))
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, sys.Fd(), kGetSupportedCPUID, uintptr(unsafe.Pointer(&cpuid)))
-	if errno != 0 {
-		return nil, errno
-	}
-
-	return cpuid.entries[:cpuid.nent], nil
+	return getCPUID(sys, kGetSupportedCPUID)
 }
 
 // GetRegs reads the vcpu's general-purpose registers.
@@ -289,33 +231,25 @@ func SetSregs(vcpu *VCPU, sregs *Sregs) error {
 // GetMSRIndexList. If CheckExtension(CapSetMSRFeatures) returns 1, GetMSRs can also read
 // the values of MSR-based features that are available from the system. In this case, the
 // given indices should come from GetMSRFeatureIndexList.
+// On a partial read, the successfully read prefix and an *MSRCountError are
+// returned. Lists larger than a single kernel batch are split automatically.
 func GetMSRs(f interface{ Fd() uintptr }, indices []int) ([]MSREntry, error) {
-	msrs := kvm_msrs{nmsrs: uint32(len(indices))}
+	entries := make([]MSREntry, len(indices))
 	for i, index := range indices {
-		msrs.entries[i].Index = uint32(index)
+		if index < 0 || uint64(index) > uint64(^uint32(0)) {
+			return nil, unix.EINVAL
+		}
+		entries[i].Index = uint32(index)
 	}
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), kGetMSRs, uintptr(unsafe.Pointer(&msrs)))
-	if errno != 0 {
-		return nil, errno
-	}
-
-	return msrs.entries[:msrs.nmsrs], nil
+	return transferMSRs(f, entries, false)
 }
 
 // SetMSRs writes model-specific registers to the VCPU.
+// A partial write returns an *MSRCountError; already written entries are not
+// rolled back. Large lists are split into kernel-sized batches.
 func SetMSRs(vcpu *VCPU, entries []MSREntry) error {
-	msrs := kvm_msrs{nmsrs: uint32(len(entries))}
-	if copy(msrs.entries[:], entries) != len(entries) {
-		return unix.E2BIG
-	}
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, vcpu.Fd(), kSetMSRs, uintptr(unsafe.Pointer(&msrs)))
-	if errno != 0 {
-		return errno
-	}
-
-	return nil
+	_, err := transferMSRs(vcpu, entries, true)
+	return err
 }
 
 // GetMPState reads the VCPU's MP startup/runnable state.
@@ -438,17 +372,7 @@ func CreatePIT2(vm *VM, cfg *PITConfig) error {
 // SetCPUID2 "defines the vcpu responses to the cpuid instruction."
 // This ioctl is available if CheckExtension(CapExtCPUID) returns 1.
 func SetCPUID2(vcpu *VCPU, entries []CPUIDEntry2) error {
-	cpuid := kvm_cpuid2{nent: uint32(len(entries))}
-	if copy(cpuid.entries[:], entries) != len(entries) {
-		return unix.E2BIG
-	}
-
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, vcpu.Fd(), kSetCPUID2, uintptr(unsafe.Pointer(&cpuid)))
-	if errno != 0 {
-		return errno
-	}
-
-	return nil
+	return setCPUID(vcpu, entries)
 }
 
 // IOExitData returns data describing the present KVM_EXIT_IO vmexit.

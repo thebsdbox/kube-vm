@@ -26,6 +26,10 @@ type BlockDevice struct {
 
 	// Metrics optionally collects guest request statistics.
 	Metrics *BlockMetrics
+
+	// SnapshotFeatures preserves the guest-visible feature contract when a
+	// checkpoint changes the host storage implementation (for example RAM to file).
+	SnapshotFeatures *uint64
 }
 
 // BlockStorage is the basic interface to a block device's backing storage. It is
@@ -185,6 +189,9 @@ func (h *blockHandler) GetType() DeviceID {
 }
 
 func (h *blockHandler) GetFeatures() (features uint64) {
+	if h.cfg.SnapshotFeatures != nil {
+		return *h.cfg.SnapshotFeatures
+	}
 	if h.w == nil {
 		return blkFRO
 	}
@@ -220,6 +227,15 @@ func (h *blockHandler) QueueReady(num int, q *virtq.Queue, notify <-chan struct{
 }
 
 func (h *blockHandler) handle(q *virtq.Queue) error {
+	return q.WithAccess(func() error { return h.drain(q) })
+}
+
+// SnapshotBlockStorage exposes logical bytes, not a COW overlay file.
+func (h *blockHandler) SnapshotBlockStorage() (BlockStorage, bool) {
+	return h.cfg.Storage, h.w == nil
+}
+
+func (h *blockHandler) drain(q *virtq.Queue) error {
 	for {
 		c, err := q.Next()
 		if err != nil {

@@ -17,6 +17,7 @@ import (
 )
 
 func TestValidateMemSize(t *testing.T) {
+	requireKVM(t) // New probes KVM before validating config.
 	badSizes := []int{
 		os.Getpagesize() - 1,
 		os.Getpagesize() + 1,
@@ -37,6 +38,7 @@ func TestValidateMemSize(t *testing.T) {
 }
 
 func TestValidateMissingLoader(t *testing.T) {
+	requireKVM(t)
 	_, err := vmm.New(vmm.Config{})
 
 	if !errors.Is(err, vmm.ErrConfig) {
@@ -45,6 +47,7 @@ func TestValidateMissingLoader(t *testing.T) {
 }
 
 func TestValidateNumCPU(t *testing.T) {
+	requireKVM(t)
 	_, err := vmm.New(vmm.Config{
 		Loader: nopLoader{},
 		NumCPU: -1,
@@ -56,6 +59,7 @@ func TestValidateNumCPU(t *testing.T) {
 }
 
 func TestSetupVMError(t *testing.T) {
+	requireKVM(t)
 	boom := errors.New("boom")
 	m, err := vmm.New(vmm.Config{
 		Loader: nopLoader{},
@@ -78,6 +82,7 @@ func TestSetupVMError(t *testing.T) {
 }
 
 func TestSetupMemoryError(t *testing.T) {
+	requireKVM(t)
 	boom := errors.New("boom")
 	m, err := vmm.New(vmm.Config{
 		Loader: nopLoader{},
@@ -100,6 +105,7 @@ func TestSetupMemoryError(t *testing.T) {
 }
 
 func TestSetupVCPUError(t *testing.T) {
+	requireKVM(t)
 	boom := errors.New("boom")
 	m, err := vmm.New(vmm.Config{
 		Loader: nopLoader{},
@@ -247,6 +253,7 @@ func TestReadSnapshotSupportsLegacyUncompressedFiles(t *testing.T) {
 }
 
 func TestLoadMemoryError(t *testing.T) {
+	requireKVM(t)
 	boom := errors.New("boom")
 	_, err := vmm.New(vmm.Config{
 		Loader: &nopLoader{
@@ -268,6 +275,7 @@ func TestLoadMemoryError(t *testing.T) {
 }
 
 func TestLoadVCPUError(t *testing.T) {
+	requireKVM(t)
 	boom := errors.New("boom")
 	_, err := vmm.New(vmm.Config{
 		Loader: &nopLoader{

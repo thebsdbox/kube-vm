@@ -144,44 +144,46 @@ func (h *netHandler) handleRx() error {
 			continue
 		}
 
-		c, err := h.rxQ.Next()
+		err = h.rxQ.WithAccess(func() error { return h.receivePacket(buf[:n]) })
 		if err != nil {
-			return err
-		}
-
-		if c == nil {
-			// No guest RX buffer available, so drop this packet.
-			continue
-		}
-
-		hdrLen := int(atomic.LoadInt32(&h.hdrLen))
-		if hdrLen < virtioNetHdrLen || hdrLen > virtioNetHdrLen+4 {
-			hdrLen = virtioNetHdrLen
-		}
-		if rxWritableCapacity(c) < hdrLen+n {
-			if err := c.Release(0); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if msg, ok := dhcpFrameSummary(buf[:n]); ok {
-			slog.Info("net dhcp rx", "summary", msg)
-			netDHCPLogf("kube-vm: net dhcp rx: %s", msg)
-		}
-		if h.takeRxTrace() {
-			netDHCPLogf("kube-vm: net rx frame: %s", frameSummary(buf[:n]))
-		}
-
-		written, err := writeRxPacket(c, buf[:n], hdrLen)
-		if err != nil {
-			return err
-		}
-
-		if err := c.Release(written); err != nil {
 			return err
 		}
 	}
+}
+
+func (h *netHandler) receivePacket(buf []byte) error {
+	c, err := h.rxQ.Next()
+	if err != nil {
+		return err
+	}
+
+	if c == nil {
+		// No guest RX buffer available, so drop this packet.
+		return nil
+	}
+
+	hdrLen := int(atomic.LoadInt32(&h.hdrLen))
+	if hdrLen < virtioNetHdrLen || hdrLen > virtioNetHdrLen+4 {
+		hdrLen = virtioNetHdrLen
+	}
+	if rxWritableCapacity(c) < hdrLen+len(buf) {
+		return c.Release(0)
+	}
+
+	if msg, ok := dhcpFrameSummary(buf); ok {
+		slog.Info("net dhcp rx", "summary", msg)
+		netDHCPLogf("kube-vm: net dhcp rx: %s", msg)
+	}
+	if h.takeRxTrace() {
+		netDHCPLogf("kube-vm: net rx frame: %s", frameSummary(buf))
+	}
+
+	written, err := writeRxPacket(c, buf, hdrLen)
+	if err != nil {
+		return err
+	}
+
+	return c.Release(written)
 }
 
 func writeRxPacket(c *virtq.Chain, pkt []byte, hdrLen int) (int, error) {
@@ -245,6 +247,29 @@ func rxWritableCapacity(c *virtq.Chain) int {
 }
 
 func (h *netHandler) handleTx(q *virtq.Queue) error {
+	return q.WithAccess(func() error { return h.drainTx(q) })
+}
+
+func (h *netHandler) SnapshotHandlerState() []byte {
+	return []byte{byte(atomic.LoadInt32(&h.hdrLen))}
+}
+
+func (h *netHandler) ValidateHandlerState(state []byte) error {
+	if len(state) != 1 || (state[0] != 10 && state[0] != 12 && state[0] != 14) {
+		return errors.New("invalid network snapshot header length")
+	}
+	return nil
+}
+
+func (h *netHandler) RestoreHandlerState(state []byte) error {
+	if err := h.ValidateHandlerState(state); err != nil {
+		return err
+	}
+	atomic.StoreInt32(&h.hdrLen, int32(state[0]))
+	return nil
+}
+
+func (h *netHandler) drainTx(q *virtq.Queue) error {
 	for {
 		c, err := q.Next()
 		if err != nil {

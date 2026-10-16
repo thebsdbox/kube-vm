@@ -141,6 +141,16 @@ func printSnapshotSummary(w io.Writer, path string, fileSize int64, snap *vmm.VM
 	fmt.Fprintf(w, "path=%s\n", path)
 	fmt.Fprintf(w, "magic=%s\n", snap.Magic)
 	fmt.Fprintf(w, "version=%d\n", snap.Version)
+	fmt.Fprintf(w, "architecture=%s\n", snap.Architecture)
+	fmt.Fprintf(w, "storage_dir=%s\n", snap.StorageDir)
+	if err := snap.ValidateRestore(); err != nil {
+		fmt.Fprintf(w, "resumable=false\nrestore_error=%s\n", err)
+	} else {
+		fmt.Fprintln(w, "resumable=true")
+	}
+	for i, disk := range snap.Storage {
+		fmt.Fprintf(w, "disk[%d]=%s bytes=%d read_only=%t sha256=%s\n", i, disk.File, disk.Size, disk.ReadOnly, disk.SHA256)
+	}
 	fmt.Fprintf(w, "file_bytes=%d\n", fileSize)
 	if !snap.CreatedAt.IsZero() {
 		fmt.Fprintf(w, "created_at=%s\n", snap.CreatedAt.Format(time.RFC3339))

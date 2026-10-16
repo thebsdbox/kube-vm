@@ -19,23 +19,30 @@ import (
 
 // Options describes a VM build request independent of its caller (CLI/daemon/web).
 type Options struct {
-	UID           string
-	FirmwarePath  string
-	KernelPath    string
-	InitrdPath    string
-	BlockSpecs    []string
-	ISOPath       string
-	Cmdline       string
-	SerialConsole bool
-	MemMiB        int
-	NumCPU        int
-	TapName       string
-	NATMode       bool
-	VhostNet      bool
-	VSOCKCID      uint64
-	VSOCKPort     uint32
-	ConsoleIn     io.Reader
-	ConsoleOut    io.Writer
+	UID            string
+	NetworkUID     string
+	// Snapshot bypasses decoding SnapshotPath when supplied. SnapshotPath still
+	// locates sibling storage assets (an empty path means the working directory).
+	SnapshotPath   string
+	Snapshot       *vmm.VMSnapshot
+	// RestoreTapName overrides only a saved TAP backend, never the network mode.
+	RestoreTapName string
+	FirmwarePath   string
+	KernelPath     string
+	InitrdPath     string
+	BlockSpecs     []string
+	ISOPath        string
+	Cmdline        string
+	SerialConsole  bool
+	MemMiB         int
+	NumCPU         int
+	TapName        string
+	NATMode        bool
+	VhostNet       bool
+	VSOCKCID       uint64
+	VSOCKPort      uint32
+	ConsoleIn      io.Reader
+	ConsoleOut     io.Writer
 }
 
 const (
@@ -45,6 +52,39 @@ const (
 
 // Build creates a vmm.Config and optional network metadata from a normalized options set.
 func Build(opts Options) (vmm.Config, vmnet.Config, error) {
+	state := opts.Snapshot
+	if state == nil && opts.SnapshotPath != "" {
+		var err error
+		state, err = vmm.ReadSnapshot(opts.SnapshotPath)
+		if err != nil {
+			return vmm.Config{}, vmnet.Config{}, err
+		}
+	}
+	if state == nil {
+		return build(opts, nil)
+	}
+	if err := ValidateSnapshotAssets(opts.SnapshotPath, state); err != nil {
+		return vmm.Config{}, vmnet.Config{}, err
+	}
+	restored, err := snapshotOptions(opts, state)
+	if err != nil {
+		return vmm.Config{}, vmnet.Config{}, err
+	}
+	dir, blocks, iso, err := cloneSnapshotAssets(opts.SnapshotPath, state)
+	if err != nil {
+		return vmm.Config{}, vmnet.Config{}, err
+	}
+	restored.BlockSpecs, restored.ISOPath = blocks, iso
+	cfg, netCfg, err := build(restored, state)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return vmm.Config{}, vmnet.Config{}, err
+	}
+	// The copies are the running guest's persistent disks, not temporary scratch.
+	return cfg, netCfg, nil
+}
+
+func build(opts Options, state *vmm.VMSnapshot) (vmm.Config, vmnet.Config, error) {
 	kernel := opts.KernelPath
 	if kernel == "" {
 		kernel = "bzImage"
@@ -52,6 +92,9 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	cmdline := normalizeConsoleCmdline(opts.Cmdline, opts.SerialConsole)
 	if opts.NATMode {
 		cmdline = ensureNATCmdline(cmdline)
+	}
+	if state != nil {
+		cmdline = state.Config.Cmdline
 	}
 	memMiB := opts.MemMiB
 	if memMiB <= 0 {
@@ -67,7 +110,9 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	}
 
 	var loader vmm.Loader
-	if opts.FirmwarePath != "" {
+	if state != nil {
+		// Memory and CPU state replace the boot loader entirely on restore.
+	} else if opts.FirmwarePath != "" {
 		fw, err := readURL(opts.FirmwarePath)
 		if err != nil {
 			return vmm.Config{}, vmnet.Config{}, err
@@ -94,9 +139,12 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 		MemSize:   memMiB << 20,
 		NumCPU:    numCPU,
 		Loader:    loader,
+		Snapshot:  state,
 		SerialIn:  opts.ConsoleIn,
 		SerialOut: opts.ConsoleOut,
 		SnapshotConfig: vmm.SnapshotConfig{
+			UID:           opts.UID,
+			NetworkUID:    opts.NetworkUID,
 			MemSize:       memMiB << 20,
 			NumCPU:        numCPU,
 			FirmwarePath:  opts.FirmwarePath,
@@ -113,6 +161,32 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 			BlockSpecs:    append([]string(nil), opts.BlockSpecs...),
 		},
 	}
+	if state != nil {
+		cfg.MemSize, cfg.NumCPU = state.Config.MemSize, state.Config.NumCPU
+		cfg.SnapshotConfig = state.Config
+		cfg.SnapshotConfig.NetworkUID = opts.NetworkUID
+		cfg.SnapshotConfig.TapName = opts.TapName
+		cfg.SnapshotConfig.BlockSpecs = append([]string(nil), opts.BlockSpecs...)
+		cfg.SnapshotConfig.ISOPath = opts.ISOPath
+	} else if cfg.SnapshotConfig.NetworkUID == "" {
+		cfg.SnapshotConfig.NetworkUID = opts.UID
+	}
+	// Close private disk handles if a later device/backend fails to build.
+	success := false
+	defer func() {
+		if state != nil && !success {
+			for _, device := range cfg.Devices {
+				switch device := device.(type) {
+				case *virtio.BlockDevice:
+					if storage, ok := device.Storage.(*virtio.FileStorage); ok {
+						_ = storage.File.Close()
+					}
+				case *virtio.NetDevice:
+					_ = device.Backend.Close()
+				}
+			}
+		}
+	}()
 	if !opts.SerialConsole {
 		cfg.SerialIn = nil
 		cfg.SerialOut = nil
@@ -128,14 +202,18 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 	}
 
 	if opts.ISOPath != "" {
-		isoDev, err := blockDeviceFromSpec(opts.ISOPath, true)
+		isoSpec := opts.ISOPath
+		if state != nil {
+			isoSpec = (&url.URL{Scheme: "file", Path: opts.ISOPath}).String()
+		}
+		isoDev, err := blockDeviceFromSpec(isoSpec, true)
 		if err != nil {
 			return vmm.Config{}, vmnet.Config{}, err
 		}
 		cfg.Devices = append(cfg.Devices, isoDev)
 	}
 
-	netCfg, err := vmnet.AttachDevice(&cfg, opts.UID, opts.TapName, opts.NATMode, opts.VhostNet)
+	netCfg, err := vmnet.AttachDevice(&cfg, cfg.SnapshotConfig.NetworkUID, opts.TapName, opts.NATMode, opts.VhostNet)
 	if err != nil {
 		return vmm.Config{}, vmnet.Config{}, err
 	}
@@ -155,10 +233,25 @@ func Build(opts Options) (vmm.Config, vmnet.Config, error) {
 		cfg.Devices = append(cfg.Devices, &virtio.VSockDevice{GuestCID: cid, Backend: backend})
 	}
 
-	if opts.ConsoleIn != nil && opts.ConsoleOut != nil {
+	console := opts.ConsoleIn != nil && opts.ConsoleOut != nil
+	if state != nil {
+		console = false
+		for _, device := range state.DeviceState {
+			console = console || device.Type == virtio.ConsoleDeviceID
+		}
+	}
+	if console {
 		cfg.Devices = append(cfg.Devices, &virtio.ConsoleDevice{In: opts.ConsoleIn, Out: opts.ConsoleOut})
 	}
+	if state != nil {
+		ordered, err := snapshotDeviceOrder(cfg.Devices, state)
+		if err != nil {
+			return vmm.Config{}, vmnet.Config{}, err
+		}
+		cfg.Devices = ordered
+	}
 
+	success = true
 	return cfg, netCfg, nil
 }
 

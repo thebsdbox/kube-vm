@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,7 +29,7 @@ func TestResumeClearsImmediateExit(t *testing.T) {
 	}
 }
 
-func TestRestoreStateDoesNotLeaveImmediateExitSet(t *testing.T) {
+func TestRestoreRejectsLegacyStateWithoutChangingVM(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "guest.snap")
 	payload := &VMSnapshot{
@@ -45,12 +46,15 @@ func TestRestoreStateDoesNotLeaveImmediateExitSet(t *testing.T) {
 	}
 
 	m := &VM{
-		mem: make([]byte, 4096),
+		mem: bytes.Repeat([]byte{0x5a}, 4096),
 		cpu: []*vcpu{{mm: make([]byte, 4096)}},
 	}
 	m.pauseCond = sync.NewCond(&m.pauseMu)
-	if err := m.RestoreState(path); err != nil {
-		t.Fatalf("RestoreState returned error: %v", err)
+	if err := m.RestoreState(path); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("RestoreState should reject incomplete legacy checkpoints: %v", err)
+	}
+	if !bytes.Equal(m.mem, bytes.Repeat([]byte{0x5a}, 4096)) {
+		t.Fatal("rejected checkpoint modified guest RAM")
 	}
 	if m.paused {
 		t.Fatal("restore left VM paused")
@@ -93,7 +97,7 @@ func TestRequestExitLockedDoesNotRaceWithVCpuStateReset(t *testing.T) {
 }
 
 func TestPauseWaitsForAllVCPUsToAcknowledge(t *testing.T) {
-	m := &VM{cpu: []*vcpu{{mm: make([]byte, 4096)}, {mm: make([]byte, 4096)}}}
+	m := &VM{running: true, cpu: []*vcpu{{mm: make([]byte, 4096)}, {mm: make([]byte, 4096)}}}
 	m.pauseCond = sync.NewCond(&m.pauseMu)
 
 	done := make(chan struct{})

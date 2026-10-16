@@ -195,6 +195,82 @@ Example with default socket:
 /tmp/kube-vm.sock.abc123.console
 ```
 
+## VM checkpoints: save, resume, and move hosts
+
+New **version 3** checkpoints save guest RAM, vCPU registers and extended state,
+MSRs/CPUID, interrupt controllers, timers/clock, UART registers, virtio registers,
+packed-ring cursors, and logical contents of every disk (including COW, RAM disks,
+and read-only ISO media). Saving pauses guest CPUs and quiesces device I/O while
+capturing RAM and copying disks, then preserves the previous running/paused state.
+This is a full checkpoint, not an incremental snapshot or live migration: large
+disks can cause significant downtime and require equivalent additional space.
+
+```sh
+# Save a running VM. Paths are on the daemon host.
+./kube-vmctl save --uid vm1 --path /var/lib/kube-vm/checkpoints/vm1.snap
+
+# Inspect metadata, the sibling storage directory, sizes and disk checksums.
+./kube-vmctl snapshot inspect /var/lib/kube-vm/checkpoints/vm1.snap
+
+# Start a NEW VM from the checkpoint; no kernel/initrd/base image is needed.
+./kube-vmctl start --uid resumed --detach \
+  --snapshot /var/lib/kube-vm/checkpoints/vm1.snap
+
+# Or resume as a standalone VM, without a daemon.
+./kube-vm --snapshot /var/lib/kube-vm/checkpoints/vm1.snap
+
+# Replace an existing VM with its saved checkpoint.
+./kube-vmctl restore --uid vm1 --path /var/lib/kube-vm/checkpoints/vm1.snap
+```
+
+Create the checkpoint's parent directory first. Saving produces **two artifacts**:
+the compressed state file and a uniquely named sibling storage directory shown
+as `storage_dir` by `snapshot inspect`. Keep both, with the same relative layout,
+when copying to another host. The original kernel, initrd, disk base and overlays
+are not required at the destination. Disk sizes and SHA-256 hashes are checked
+before restore; do not edit the checkpoint's disk assets.
+
+Each restore creates a private `.kube-vm-restore-*` directory beside the checkpoint
+and runs against those disk copies, never the saved assets. These directories hold
+persistent guest changes and are **not automatically deleted**. VM details expose
+their disk paths. Re-saving an existing checkpoint publishes new uniquely named
+assets; old asset directories are retained for safety and can be removed manually
+when no checkpoint references them. Protect/transfer all artifacts as sensitive
+data: RAM and disks may contain credentials; encryption is not supplied.
+
+**Restore replaces the current VM**, including its disks, with the saved state.
+Current changes are not carried over; save them separately first. Existing
+console sessions disconnect and must reconnect. In the dashboard use **Details &
+actions → Save snapshot / Restore snapshot**, or **New VM → Advanced → Resume from
+checkpoint** to boot a new instance. Saved memory/CPU/network settings override
+ordinary launch-form and CLI boot defaults.
+
+### Host and device compatibility
+
+- Destination must run compatible Linux/amd64 KVM and this checkpoint format.
+  CPU execution features, XSAVE layout, and KVM capabilities are checked
+  conservatively. Different physical cache geometry or APIC IDs are permitted,
+  but arbitrary Intel/AMD/model/kernel changes are not promised. TSC frequency
+  differences require supported KVM scaling. Test target hosts before relying on
+  checkpoints for recovery or migration.
+- TAP/NAT backends are recreated. Saved NAT identity is retained even if the new
+  VM UID differs. **Stop the original before resuming the copy on a shared
+  network** to avoid duplicate IP/network identities. A TAP-mode checkpoint can
+  use `--tap <destination-interface>`; this does not change its network mode.
+  Destination permissions, routing, and firewall configuration must be suitable.
+- Host-side NAT connection tracking, external TCP connections, shared console
+  sessions, and host descriptors are not checkpointed. Connections may need
+  re-establishing. Live VSock and vhost-net checkpoints are explicitly unsupported.
+- Newly booted guests do not advertise nested VMX/SVM or supervisor XSAVES state,
+  which are not supported by this format. Already-running guests exposing these
+  features may be rejected when saving; restart them with the updated VMM first.
+- Old version 1/2 files remain inspectable but **cannot be safely resumed**:
+  they omitted essential CPU, device-queue, and disk state. Create a new checkpoint
+  with the updated VMM rather than attempting a partial restore.
+- Only restore trusted checkpoints. Disk hashes detect accidental corruption,
+  not authenticity; checkpoints are neither signed nor encrypted. In-memory state
+  of remote services is outside the VM and cannot be rolled back with the guest.
+
 ## Storage and Boot Options
 
 ### Storage statistics

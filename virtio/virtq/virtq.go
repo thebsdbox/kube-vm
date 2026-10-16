@@ -11,6 +11,43 @@ import (
 type Config struct {
 	MemAt  func(addr uint64, len int) ([]byte, error)
 	Notify func() error
+	// BeginAccess obtains the bus I/O gate and returns its release function.
+	// Nil permits standalone queues without a bus.
+	BeginAccess func() func()
+}
+
+// QueueState is the host cursor state of a packed queue. It does not include
+// guest memory. Snapshot and RestoreState require a quiesced queue.
+type QueueState struct {
+	AvailIndex, UsedIndex uint16
+	AvailWrap, UsedWrap   bool
+}
+
+// WithAccess runs a complete chain or drain operation under the shared I/O gate.
+// Do not nest calls or wait for host input inside fn.
+func (q *Queue) WithAccess(fn func() error) error {
+	if q.cfg.BeginAccess != nil {
+		release := q.cfg.BeginAccess()
+		defer release()
+	}
+	return fn()
+}
+
+func (q *Queue) Snapshot() QueueState {
+	return QueueState{q.aidx, q.uidx, q.availWrap, q.usedWrap}
+}
+
+// RestoreState rejects out-of-range cursors and incomplete chains. The caller
+// must hold the exclusive bus gate (or otherwise stop a standalone queue).
+func (q *Queue) RestoreState(s QueueState) error {
+	if len(q.ring) == 0 || len(q.ring) > 1<<15 || int(s.AvailIndex) >= len(q.ring) || int(s.UsedIndex) >= len(q.ring) {
+		return errors.New("invalid packed queue cursor or ring size")
+	}
+	if s.AvailIndex != s.UsedIndex || s.AvailWrap != s.UsedWrap {
+		return errors.New("packed queue snapshot contains an incomplete chain")
+	}
+	q.aidx, q.uidx, q.availWrap, q.usedWrap = s.AvailIndex, s.UsedIndex, s.AvailWrap, s.UsedWrap
+	return nil
 }
 
 // Queue is a packed virtqueue.

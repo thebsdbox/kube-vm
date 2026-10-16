@@ -287,7 +287,7 @@ const frontendHTML = `<!doctype html>
 							<div class="field"><label for="start-tap">Custom TAP interface</label><input id="start-tap" name="tap" /></div>
 							<div class="field"><label for="start-vhost">vhost-net (currently unavailable)</label><input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" /></div>
 			  <div class="field" style="grid-column: 1 / -1;"><label>Cmdline</label><input name="cmdline" value="console=hvc0 root=/dev/vda reboot=t" /></div>
-              <div class="field"><label>Snapshot</label><input name="snapshot" placeholder="/tmp/kube-vm/vm.snap" /></div>
+							<div class="field"><label>Resume from checkpoint</label><input name="snapshot" placeholder="/tmp/kube-vm/vm.snap" /><small class="section-note">Uses saved CPU, memory, disks, and networking instead of the boot fields. Keep the checkpoint's sibling storage directory alongside it.</small></div>
               <div class="field"><label>CoW base</label><input name="cow_base" placeholder="/var/lib/kube-vm/base.img" /></div>
               <div class="field"><label>CoW overlay</label><input name="cow_overlay" placeholder="/var/lib/kube-vm/vm.overlay" /></div>
             </div>
@@ -1260,9 +1260,9 @@ const frontendHTML = `<!doctype html>
       if (!path) {
         return;
       }
-      statusEl.textContent = 'saving ' + uid + '...';
+	statusEl.textContent = 'saving CPU, memory, and disks for ' + uid + ' (VM pauses during capture)...';
       await api('/api/v1/vms/save?uid=' + encodeURIComponent(uid) + '&path=' + encodeURIComponent(path), { method: 'POST' });
-      statusEl.textContent = 'saved ' + uid + ' to ' + path;
+	statusEl.textContent = 'saved ' + uid + ' to ' + path + ' with a sibling storage directory. Move both together; inspect the checkpoint for its directory name.';
       await refresh();
     }
 
@@ -1271,9 +1271,14 @@ const frontendHTML = `<!doctype html>
       if (!path) {
         return;
       }
+			if (!window.confirm('Replace ' + uid + ' with this checkpoint? The current VM will stop, changes since the checkpoint will not be restored, and consoles must reconnect.')) return;
       statusEl.textContent = 'restoring ' + uid + '...';
       await api('/api/v1/vms/restore?uid=' + encodeURIComponent(uid) + '&path=' + encodeURIComponent(path), { method: 'POST' });
       statusEl.textContent = 'restored ' + uid + ' from ' + path;
+			if (consoleUID.value.trim() === uid && consoleSessionID) {
+				try { await closeConsole(); } catch (_) {}
+				consoleStatus.textContent = 'VM restored. Open Console to reconnect.';
+			}
       await refresh();
     }
 
