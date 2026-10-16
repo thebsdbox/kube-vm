@@ -218,20 +218,40 @@ locks, so snapshots can be slightly inconsistent while requests complete.
 They describe guest-visible block I/O, not filesystem used/free space or physical
 host I/O (for example, COW write amplification is not included).
 
-The web dashboard's **Storage** column shows per-disk totals, capacity, read-only
+The dashboard opens with responsive VM cards containing essential resources,
+state, and networking. **Console** connects directly; **Details & actions**
+reveals boot paths, errors, pause/resume, snapshots, and stop controls. Stopping
+a VM requires confirmation.
+
+Statistics are hidden by default. Open **Statistics** in the toolbar for daemon
+metrics, or a VM's **Statistics** button for its host resources, network counters,
+and storage activity. Per-disk statistics include totals, capacity, read-only
 status, errors, pending I/O, and average/maximum latency. Throughput and IOPS are
 calculated between dashboard refreshes; the first sample has no rate yet.
 
-The **Show History / Hide History** button in the **Server Statistics** header
-toggles a historical graph without hiding the current statistics cards. The
-button changes color and remembers its visibility setting in browser local
-storage when available.
+The **Show History / Hide History** button inside the **Statistics explorer**
+toggles a historical graph. A VM's **Statistics** button selects that VM and
+opens its graph. Graph visibility is remembered in browser local storage when
+available; the explorer itself remains collapsed on a fresh page load.
 
-- Choose server/all VMs, an individual VM, or an individual disk as the source.
+**New VM** opens the launch form, with less common settings under **Advanced
+options**. The **Configuration library** and **Connection settings** can also
+be expanded when needed; an explicitly saved configuration-library visibility
+preference is retained.
+
+- Choose server/all VMs, an individual VM, an individual disk, or a network
+  interface as the source.
 - Plot storage read/write throughput, IOPS, interval-average latency, pending
-  requests, errors per second, VM host CPU, or memory. CPU and memory are not
-  applicable to individual disks; server memory means daemon heap, while VM
-  memory means assigned memory, not guest filesystem usage.
+  requests, errors per second, network RX/TX throughput (bytes/sec), network
+  RX/TX packet rates (packets/sec), VM host CPU, or memory.
+- Network graphs aggregate available NIC rates for a VM or the entire fleet,
+  or show one selected interface. RX/TX follows the host-side NIC counters:
+  RX is traffic received from the backend for the guest; TX is traffic sent
+  by the guest. Rates need two samples; restarts, replaced interfaces, and
+  counter resets start a new baseline rather than producing spikes.
+- Disk sources have no network metrics; NIC sources have no storage, CPU,
+  or memory metrics. Server memory means daemon heap, while VM memory means
+  assigned memory, not guest filesystem usage.
 - Select a 5-minute, 15-minute, or one-hour window. Up to 720 samples from the
   last hour are retained in the open tab, including while the graph is hidden.
 - History starts when the page opens and is cleared on reload; it is not a

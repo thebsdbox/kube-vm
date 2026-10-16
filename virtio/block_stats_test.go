@@ -79,7 +79,7 @@ func (s *blockedStatsStorage) WriteAt(p []byte, off int64) (int, error) {
 func TestBlockMetricsSnapshotDuringBlockedIO(t *testing.T) {
 	s := &blockedStatsStorage{
 		syncStorage: &syncStorage{buf: make([]byte, 4096)},
-		entered: make(chan struct{}), resume: make(chan struct{}),
+		entered:     make(chan struct{}), resume: make(chan struct{}),
 	}
 	m := NewBlockMetrics("blocked", 4096, false)
 	handler, err := (BlockDevice{Storage: s, Metrics: m}).NewHandler()

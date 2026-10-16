@@ -88,29 +88,29 @@ type VMNIC struct {
 }
 
 type VMDetails struct {
-	UID          string   `json:"uid,omitempty"`
-	State        string   `json:"state,omitempty"`
-	StartedAt    string   `json:"started_at,omitempty"`
-	UptimeSec    int64    `json:"uptime_sec,omitempty"`
-	MemMiB       int      `json:"mem_mib,omitempty"`
-	NumCPU       int      `json:"num_cpu,omitempty"`
-	Firmware     string   `json:"firmware,omitempty"`
-	Kernel       string   `json:"kernel,omitempty"`
-	Initrd       string   `json:"initrd,omitempty"`
-	ISO          string   `json:"iso,omitempty"`
-	Cmdline      string   `json:"cmdline,omitempty"`
-	Tap          string   `json:"tap,omitempty"`
-	NAT          bool     `json:"nat,omitempty"`
-	VhostNet     bool     `json:"vhost_net,omitempty"`
-	NATSubnet    string   `json:"nat_subnet,omitempty"`
-	NATGateway   string   `json:"nat_gateway,omitempty"`
-	NATGuestIP   string   `json:"nat_guest_ip,omitempty"`
-	Block        []string `json:"block,omitempty"`
-	HostMemBytes uint64   `json:"host_mem_bytes,omitempty"`
-	HostCPUSec   float64  `json:"host_cpu_sec,omitempty"`
-	HostCPUPct   float64  `json:"host_cpu_pct,omitempty"`
-	LastError    string   `json:"last_error,omitempty"`
-	NICs         []VMNIC  `json:"nics,omitempty"`
+	UID          string              `json:"uid,omitempty"`
+	State        string              `json:"state,omitempty"`
+	StartedAt    string              `json:"started_at,omitempty"`
+	UptimeSec    int64               `json:"uptime_sec,omitempty"`
+	MemMiB       int                 `json:"mem_mib,omitempty"`
+	NumCPU       int                 `json:"num_cpu,omitempty"`
+	Firmware     string              `json:"firmware,omitempty"`
+	Kernel       string              `json:"kernel,omitempty"`
+	Initrd       string              `json:"initrd,omitempty"`
+	ISO          string              `json:"iso,omitempty"`
+	Cmdline      string              `json:"cmdline,omitempty"`
+	Tap          string              `json:"tap,omitempty"`
+	NAT          bool                `json:"nat,omitempty"`
+	VhostNet     bool                `json:"vhost_net,omitempty"`
+	NATSubnet    string              `json:"nat_subnet,omitempty"`
+	NATGateway   string              `json:"nat_gateway,omitempty"`
+	NATGuestIP   string              `json:"nat_guest_ip,omitempty"`
+	Block        []string            `json:"block,omitempty"`
+	HostMemBytes uint64              `json:"host_mem_bytes,omitempty"`
+	HostCPUSec   float64             `json:"host_cpu_sec,omitempty"`
+	HostCPUPct   float64             `json:"host_cpu_pct,omitempty"`
+	LastError    string              `json:"last_error,omitempty"`
+	NICs         []VMNIC             `json:"nics,omitempty"`
 	Storage      []virtio.BlockStats `json:"storage,omitempty"`
 }
 

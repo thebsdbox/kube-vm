@@ -11,6 +11,7 @@ RUN apt-get update ; \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN echo 'ubuntu:ubuntu' | chpasswd ; usermod -a -G sudo ubuntu
+RUN echo -e "ubuntu ALL=(ALL:ALL) NOPASSWD: ALL\nDefaults:ubuntu verifypw=any\n" > /etc/sudoers.d/dont-prompt-ubuntu-for-sudo-password
 RUN systemctl enable ssh
 
 CMD ["/lib/systemd/systemd"]

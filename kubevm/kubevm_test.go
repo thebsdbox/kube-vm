@@ -35,7 +35,9 @@ func TestVMStorageStatsSnapshotAndDetails(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var body struct { Storage []map[string]any `json:"storage"` }
+		var body struct {
+			Storage []map[string]any `json:"storage"`
+		}
 		if err := json.Unmarshal(encoded, &body); err != nil {
 			t.Fatal(err)
 		}

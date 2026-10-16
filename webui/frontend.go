@@ -10,25 +10,25 @@ const frontendHTML = `<!doctype html>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
-		html { font-size: 125%; }
+		html { font-size: 100%; scroll-behavior: smooth; }
     :root {
-      --bg: #f6efe6;
-      --panel: #fffaf3;
-      --ink: #1f2b22;
-      --muted: #5d6d61;
-      --accent: #0f7b6c;
-      --accent-2: #d36a2e;
+	--bg: #f4f6fa;
+	--panel: #ffffff;
+	--ink: #17243b;
+	--muted: #63718a;
+	--accent: #4361d8;
+	--accent-2: #c77a20;
       --ok: #176d39;
       --stop: #9a2f2f;
-      --line: #d9c9b3;
-      --shadow: 0 14px 28px rgba(39, 35, 27, 0.14);
+	--line: #e2e7f0;
+	--shadow: 0 4px 20px rgba(23, 36, 59, 0.04);
     }
 		body.dark {
 			--bg: #10161c;
 			--panel: #17202a;
 			--ink: #e8eef5;
 			--muted: #b0bfce;
-			--accent: #2ea98f;
+			--accent: #91a5ff;
 			--accent-2: #e58d47;
 			--ok: #53d487;
 			--stop: #f18484;
@@ -41,15 +41,16 @@ const frontendHTML = `<!doctype html>
       min-height: 100vh;
       font-family: "Sora", sans-serif;
       color: var(--ink);
-      background: radial-gradient(circle at 20% 10%, rgba(211,106,46,0.18) 0%, rgba(246,239,230,0) 35%), radial-gradient(circle at 80% 0%, rgba(15,123,108,0.18) 0%, rgba(246,239,230,0) 40%), linear-gradient(180deg, #f8f1e8 0%, #f3ece3 100%);
-      padding: 20px;
+			background: var(--bg);
+			padding: 32px;
+			line-height: 1.6;
       animation: reveal 280ms ease-out;
     }
 		body.dark {
-			background: radial-gradient(circle at 15% 10%, rgba(46, 169, 143, 0.16) 0%, rgba(16,22,28,0) 40%), radial-gradient(circle at 85% 0%, rgba(229,141,71,0.12) 0%, rgba(16,22,28,0) 45%), linear-gradient(180deg, #0f151b 0%, #10161c 100%);
+			background: var(--bg);
 		}
     @keyframes reveal { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-	.wrap { width: 90%; max-width: none; margin: 0 auto; display: grid; gap: 16px; }
+	.wrap { width: 100%; max-width: 1440px; margin: 0 auto; display: grid; gap: 24px; }
     .title { margin: 0; font-size: clamp(1.4rem, 2.8vw, 2.2rem); letter-spacing: 0.01em; }
     .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 0.95rem; }
     .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
@@ -111,28 +112,95 @@ const frontendHTML = `<!doctype html>
 		.two { display: grid; gap: 14px; grid-template-columns: 1fr; }
 		.head-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 		@media (max-width: 920px) { .two { grid-template-columns: 1fr; } }
-	@media (max-width: 760px) { body { padding: 14px; } .base-disk-field { grid-column: span 1; min-width: 0; } th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8) { display: none; } }
+	.masthead { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; padding: 8px 0 16px; }
+	.brand { display: flex; align-items: center; gap: 14px; }
+	.brand-mark { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 14px; background: var(--accent); color: var(--panel); font-weight: 700; letter-spacing: -2px; font-size: 1.4rem; }
+	.eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.7rem; font-weight: 700; }
+	.title { font-size: 1.65rem; letter-spacing: -0.04em; }
+	.subtitle { font-size: 0.9rem; }
+	.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+	.panel { border-radius: 18px; scroll-margin-top: 24px; }
+	.panel-head, .panel h2 { padding: 22px 26px; }
+	.panel-head h2 { padding: 0; }
+	.section-note { margin: 4px 0 0; color: var(--muted); font-size: 0.85rem; }
+	.content { padding: 26px; }
+	.panel > summary { list-style: none; cursor: pointer; padding: 22px 26px; display: flex; align-items: center; gap: 16px; }
+	.panel > summary::-webkit-details-marker { display: none; }
+	.panel > summary::after { content: '+'; margin-left: auto; color: var(--muted); font-size: 1.35rem; }
+	.panel[open] > summary { border-bottom: 1px solid var(--line); }
+	.panel[open] > summary::after { content: '−'; }
+	.panel > summary strong { display: block; font-size: 1rem; }
+	.panel > summary small { display: block; color: var(--muted); font-size: 0.85rem; margin-top: 3px; }
+	.grid, .compact-grid { gap: 20px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+	.compact-grid input, .compact-grid textarea, .compact-grid select, input, textarea, select { padding: 11px 13px; min-height: 44px; color: var(--ink); background: var(--panel); border-radius: 10px; }
+	label { font-size: 0.82rem; font-weight: 600; margin-bottom: 7px; }
+	input:disabled { opacity: 0.55; }
+	input[type="checkbox"] { min-height: 18px; height: 18px; width: 18px; padding: 0; accent-color: var(--accent); }
+	button { min-height: 42px; font-size: 0.85rem; padding: 10px 16px; }
+	button:focus-visible, summary:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+	.primary, .toggle-on { color: #fff; background: #4361d8; }
+	.ghost, .toggle-off { color: var(--ink); background: var(--bg); border: 1px solid var(--line); }
+	.danger { color: var(--stop); background: transparent; border: 1px solid var(--line); }
+	.actions { gap: 10px; margin-top: 20px; }
+	.status { font-size: 0.85rem; overflow-wrap: anywhere; }
+	.status:empty { display: none; }
+	.fleet-summary { color: var(--muted); font-size: 0.85rem; }
+	.vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 20px; }
+	.vm-card { border: 1px solid var(--line); border-radius: 14px; padding: 22px; min-width: 0; background: var(--panel); }
+	.vm-card h3 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+	.vm-card .card-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+	.vm-resources { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 0.85rem; margin: 18px 0; }
+	.vm-network { font-size: 0.82rem; color: var(--muted); overflow-wrap: anywhere; }
+	.vm-more { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+	.vm-more > summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+	.vm-more dl { font-size: 0.8rem; }
+	.vm-more dt { color: var(--muted); margin-top: 12px; }
+	.vm-more dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+	.empty-state { padding: 40px 24px; text-align: center; color: var(--muted); grid-column: 1 / -1; }
+	.empty-state strong { display: block; color: var(--ink); font-size: 1.1rem; margin-bottom: 8px; }
+	.stats-toolbar { margin: 26px 0 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+	.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 20px; }
+	.metric-section { padding: 20px; border: 1px solid var(--line); border-radius: 12px; overflow-wrap: anywhere; }
+	.metric-section h3 { margin: 0 0 12px; font-size: 0.95rem; }
+	.metric-section p { color: var(--muted); font-size: 0.85rem; }
+	.console-shell { height: 400px; }
+	.two { grid-template-columns: minmax(0, 1fr) 290px; gap: 28px; }
+	.console-tools .actions button { flex: 1 1 auto; }
+	.config-tools { display: flex; align-items: end; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
+	.config-tools .field { flex: 1 1 240px; }
+	.config-tools .actions { margin: 0; }
+	@media (max-width: 960px) { .two { grid-template-columns: 1fr; } .console-tools { max-width: none; } }
+	@media (max-width: 600px) { body { padding: 16px; } .wrap { gap: 18px; } .content, .panel-head, .panel h2, .panel > summary { padding: 20px; } .panel-head h2 { padding: 0; } .base-disk-field { grid-column: span 1; min-width: 0; } .masthead .toolbar { width: 100%; } .grid, .compact-grid { grid-template-columns: 1fr; } .vm-card { padding: 18px; } }
+	@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } body { animation: none; } button { transition: none; } }
   </style>
 </head>
 <body>
   <main class="wrap">
-    <header>
-			<div class="head-row">
-				<h1 class="title">kube-vm web control</h1>
-				<button class="ghost" id="theme-toggle" type="button">Toggle Dark Mode</button>
+		<header>
+			<div class="masthead">
+				<div class="brand"><span class="brand-mark" aria-hidden="true">kv</span><div><div class="eyebrow">Virtual machine workspace</div><h1 class="title">kube-vm</h1></div></div>
+				<div class="toolbar">
+					<button class="ghost" type="button" data-reveal="statistics-panel">Statistics</button>
+					<button class="ghost" type="button" data-reveal="connection-settings">Connection</button>
+					<button class="ghost" id="theme-toggle" type="button">Appearance</button>
+					<button class="primary" type="button" data-reveal="launch-panel">+ New VM</button>
+				</div>
 			</div>
-      <p class="subtitle">Start, stop, inspect status/statistics, and attach a live web console.</p>
-    </header>
+			<div class="fleet-summary" id="fleet-summary">Connecting to your workspace…</div>
+			<div class="status" id="status" role="status" aria-live="polite"></div>
+		</header>
 
-    <section class="panel"><h2>API auth token</h2><div class="content"><label>Bearer token (optional)</label><input id="token" placeholder="matches -web-token" /><div class="status">Stored in your browser local storage for this page origin.</div></div></section>
+		<section class="panel" id="machines-panel" aria-labelledby="machines-heading">
+			<div class="panel-head"><div><h2 id="machines-heading">Virtual machines</h2><p class="section-note">Your machines, without the noise. Open a console or explore details when you need them.</p></div><button class="ghost" type="button" id="refresh">Refresh</button></div>
+			<div class="content"><div class="vm-grid" id="vm-rows"><div class="empty-state">Loading virtual machines…</div></div></div>
+		</section>
 
-		<section class="panel">
-			<div class="panel-head">
-				<h2>Server Statistics</h2>
-				<button id="stats-history-toggle" class="toggle-off" type="button" aria-controls="stats-history" aria-expanded="false">Show History</button>
-			</div>
+		<details class="panel" id="statistics-panel">
+			<summary><div><strong>Statistics explorer</strong><small>Server health, VM resources, network traffic, storage I/O, and historical graphs</small></div></summary>
 			<div class="content">
 				<section class="cards" id="cards"></section>
+				<div class="stats-toolbar"><div class="field"><label for="statistics-vm">Inspect a virtual machine</label><select id="statistics-vm"><option value="">Select a VM for detailed statistics</option></select></div><button id="stats-history-toggle" class="toggle-off" type="button" aria-controls="stats-history" aria-expanded="false">Show History</button></div>
+				<div class="metrics-grid" id="vm-statistics"><p class="section-note">Choose a VM to explore CPU, memory, network, and disk activity.</p></div>
 				<div class="stats-history" id="stats-history" hidden>
 					<div class="history-controls">
 						<div><label for="stats-history-source">Source</label><select id="stats-history-source"><option value="all">Server / all VMs</option></select></div>
@@ -142,6 +210,8 @@ const frontendHTML = `<!doctype html>
 							<option value="latency">Storage average latency</option>
 							<option value="pending">Storage pending requests</option>
 							<option value="errors">Storage errors / second</option>
+							<option value="network">Network throughput</option>
+							<option value="packets">Network packet rate</option>
 							<option value="cpu">VM host CPU</option>
 							<option value="memory">Memory</option>
 						</select></div>
@@ -153,24 +223,22 @@ const frontendHTML = `<!doctype html>
 					<div class="history-legend" id="stats-history-legend"></div>
 					<div class="status" id="stats-history-summary"></div>
 					<div class="status">Samples are collected every 5 seconds while this page is open, even when hidden. Up to one hour is kept in this tab; reloading clears history. Memory shows daemon heap or VM assigned memory.</div>
+					<div class="status">Network RX/TX follows the host-side NIC counters: RX is traffic delivered to the guest, TX is traffic sent by the guest. Choose a VM or network interface for network graphs; disk sources have no network metrics.</div>
 				</div>
 			</div>
-		</section>
+		</details>
 
-    <section class="panel">
-      <h2>Start VM</h2>
+		<details class="panel" id="launch-panel">
+			<summary><div><strong>Create a virtual machine</strong><small>Choose a kernel, allocate resources, and launch a new instance</small></div></summary>
       <div class="content">
         <form id="start-form">
           <div class="grid compact-grid">
-            <div class="field"><label>UID</label><input name="uid" placeholder="optional" /></div>
-            <div class="field"><label>Mem</label><input name="mem" value="1024" /></div>
-            <div class="field"><label>VCPUs</label><input name="cpu" value="1" /></div>
-            <div class="field"><label>Kernel</label><input name="kernel" value="bzImage" /></div>
-            <div class="field"><label>Initrd</label><input name="initrd" value="initramfs.cpio.gz" /></div>
-            <div class="field"><label>Firmware</label><input name="firmware" /></div>
-            <div class="field"><label>ISO</label><input name="iso" /></div>
-			<div class="field base-disk-field"><label>Base disk</label><select name="base_disk" id="base-disk"><option value="">none</option></select></div>
-            <div class="field"><label>TAP</label><input name="tap" /></div>
+						<div class="field"><label for="start-uid">Machine ID</label><input id="start-uid" name="uid" placeholder="Automatically generated" /></div>
+						<div class="field"><label for="start-memory">Memory (MiB)</label><input id="start-memory" name="mem" type="number" min="1" value="1024" /></div>
+						<div class="field"><label for="start-cpu">Virtual CPUs</label><input id="start-cpu" name="cpu" type="number" min="1" value="1" /></div>
+						<div class="field"><label for="start-kernel">Kernel image</label><input id="start-kernel" name="kernel" value="bzImage" /></div>
+						<div class="field"><label for="start-initrd">Initial RAM disk</label><input id="start-initrd" name="initrd" value="initramfs.cpio.gz" /></div>
+			<div class="field base-disk-field"><label for="base-disk">Base disk</label><select name="base_disk" id="base-disk"><option value="">none</option></select></div>
             <div class="field" style="justify-content: end;">
               <label>&nbsp;</label>
               <label style="display:flex; align-items:center; gap:8px; margin:0;">
@@ -178,20 +246,17 @@ const frontendHTML = `<!doctype html>
                 <span>NAT</span>
               </label>
             </div>
-            <div class="field" style="justify-content: end;">
-              <label>&nbsp;</label>
-              <label style="display:flex; align-items:center; gap:8px; margin:0;">
-                <input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" />
-                <span>vhost</span>
-              </label>
-            </div>
           </div>
-					<div class="status">NAT and TAP are mutually exclusive. vhost-net requires TAP and is currently rejected if requested.</div>
+					<p class="section-note">Enable NAT for automatic guest networking. Custom TAP and boot options are under Advanced.</p>
 					<div class="advanced-wrap">
 					  <button class="ghost advanced-toggle" id="advanced-toggle" type="button" aria-expanded="false">Show advanced</button>
 					</div>
           <div id="advanced-start-fields" class="advanced">
             <div class="grid compact-grid" style="margin-top:8px;">
+							<div class="field"><label for="start-firmware">Firmware image (optional)</label><input id="start-firmware" name="firmware" /></div>
+							<div class="field"><label for="start-iso">ISO image (optional)</label><input id="start-iso" name="iso" /></div>
+							<div class="field"><label for="start-tap">Custom TAP interface</label><input id="start-tap" name="tap" /></div>
+							<div class="field"><label for="start-vhost">vhost-net (currently unavailable)</label><input id="start-vhost" name="vhost" type="checkbox" style="width:auto;" /></div>
 			  <div class="field" style="grid-column: 1 / -1;"><label>Cmdline</label><input name="cmdline" value="console=hvc0 root=/dev/vda reboot=t" /></div>
               <div class="field"><label>Snapshot</label><input name="snapshot" placeholder="/tmp/kube-vm/vm.snap" /></div>
               <div class="field"><label>CoW base</label><input name="cow_base" placeholder="/var/lib/kube-vm/base.img" /></div>
@@ -208,27 +273,26 @@ const frontendHTML = `<!doctype html>
 						<label for="start-connect" style="margin:0;">Auto-connect web console after VM start</label>
 					</div>
           </div>
-          <div class="actions"><button class="primary" type="submit">Start VM</button><button class="ghost" type="button" id="refresh">Refresh</button></div>
-          <div class="status" id="status"></div>
+					<div class="actions"><button class="primary" type="submit">Start virtual machine</button><button class="ghost" type="button" data-reveal="saved-configurations">Use a saved configuration</button></div>
         </form>
       </div>
-    </section>
+		</details>
 
-		<section class="panel">
+		<section class="panel" id="saved-configurations">
 			<div class="panel-head">
-				<h2>Saved VM Configurations</h2>
-				<button class="ghost" id="config-toggle" type="button">Hide Saved Configurations</button>
+				<div><h2>Configuration library</h2><p class="section-note">Save a setup once. Launch it again in a click.</p></div>
+				<button class="ghost" id="config-toggle" type="button" aria-controls="saved-config-content" aria-expanded="false">Show configurations</button>
 			</div>
-			<div class="content">
-				<div class="grid">
-					<div>
+			<div class="content" id="saved-config-content" style="display:none;">
+				<div class="config-tools">
+					<div class="field">
 						<label>Configuration name</label>
 						<input id="config-name" placeholder="example: ubuntu-ci" />
 					</div>
-				</div>
 				<div class="actions">
 					<button class="primary" id="config-save" type="button">Save Current Form</button>
 					<button class="ghost" id="config-clear-recent" type="button">Clear Recent</button>
+				</div>
 				</div>
 				<div class="status" id="config-status"></div>
 				<div id="saved-config-list" style="margin-top:10px; overflow:auto;">
@@ -240,25 +304,15 @@ const frontendHTML = `<!doctype html>
 			</div>
 		</section>
 
-    <section class="panel">
-      <h2>Virtual Machines</h2>
-			<div class="content" style="overflow:auto;">
-				<table>
-					<thead><tr><th>UID</th><th>State</th><th>Uptime</th><th>Mem</th><th>CPU</th><th>Host CPU</th><th>Host Mem</th><th>Boot</th><th>Network</th><th>NIC Stats</th><th>Storage</th><th>Action</th></tr></thead>
-          <tbody id="vm-rows"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Console</h2>
+		<section class="panel" id="console-panel">
+			<div class="panel-head"><div><h2>Console</h2><p class="section-note">Connect to a machine or share a dedicated terminal window.</p></div></div>
       <div class="content two">
 				<div>
 					<div class="console"><div class="console-shell" id="console-terminal"></div></div>
 					<div class="status" id="console-hint">Click terminal to focus. Paste with Ctrl+Shift+V or Cmd+V. Ctrl+L clears local terminal view.</div>
 				</div>
-        <div>
-          <label>VM UID</label><input id="console-uid" />
+				<div class="console-tools">
+					<label for="console-uid">Machine ID</label><input id="console-uid" placeholder="Select Console on a VM above" />
 		  <div class="actions"><button class="primary" id="console-open" type="button">Open Console</button><button class="ghost" id="console-open-window" type="button">Open Shared Window</button><button class="ghost" id="console-copy-link" type="button">Copy Share Link</button><button class="ghost" id="console-close" type="button">Close</button></div>
 		  <div style="margin-top:10px;">
 			<label for="console-share-mode">Shared window mode</label>
@@ -276,6 +330,10 @@ const frontendHTML = `<!doctype html>
         </div>
       </div>
     </section>
+		<details class="panel" id="connection-settings">
+			<summary><div><strong>Connection settings</strong><small>API authentication for this browser</small></div></summary>
+			<div class="content"><label for="token">Bearer token (optional)</label><input type="password" id="token" autocomplete="off" placeholder="Matches the server's web token" /><p class="section-note">Stored in local storage for this browser origin. Only use a trusted browser.</p></div>
+		</details>
   </main>
 
   <script>
@@ -297,7 +355,7 @@ const frontendHTML = `<!doctype html>
 	const configSaveEl = document.getElementById('config-save');
 	const configClearRecentEl = document.getElementById('config-clear-recent');
 	const configToggleEl = document.getElementById('config-toggle');
-	const configPanelContentEl = document.getElementById('saved-config-list');
+	const configPanelContentEl = document.getElementById('saved-config-content');
 	const baseDiskSelectEl = document.getElementById('base-disk');
 	const advancedToggleEl = document.getElementById('advanced-toggle');
 	const advancedFieldsEl = document.getElementById('advanced-start-fields');
@@ -551,6 +609,7 @@ const frontendHTML = `<!doctype html>
 			if (!startFormEl || !cfg) {
 				return;
 			}
+			revealPanel('launch-panel');
 			const fields = ['uid', 'mem', 'cpu', 'kernel', 'initrd', 'firmware', 'iso', 'base_disk', 'tap', 'snapshot', 'cow_base', 'cow_overlay', 'cmdline', 'block'];
 			for (const key of fields) {
 				const el = startFormEl.elements.namedItem(key);
@@ -614,9 +673,13 @@ const frontendHTML = `<!doctype html>
 				return 0;
 			});
 
-			configRowsEl.innerHTML = '';
+			configRowsEl.textContent = '';
 			if (rows.length === 0) {
-				configRowsEl.innerHTML = '<tr><td colspan="5" class="mono">No saved or recent VM configurations yet.</td></tr>';
+				const empty = uiElement('tr');
+				const cell = uiElement('td', 'mono', 'No saved or recent VM configurations yet.');
+				cell.colSpan = 5;
+				empty.appendChild(cell);
+				configRowsEl.appendChild(empty);
 				return;
 			}
 
@@ -624,26 +687,24 @@ const frontendHTML = `<!doctype html>
 				const cfg = normalizeConfigPayload(rec.item.payload || {});
 				const tr = document.createElement('tr');
 				const savedAt = rec.item.updated_at || rec.item.created_at || '';
-				const actions = rec.source === 'global'
-					? '<button class="ghost" data-load="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Load</button> <button class="primary" data-start="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Start</button>'
-					: '<button class="ghost" data-load="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Load</button> ' +
-					'<button class="primary" data-start="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Start</button> ' +
-					'<button class="warn" data-delete="1" data-source="' + rec.source + '" data-id="' + rec.item.id + '">Delete</button>';
-				tr.innerHTML =
-					'<td class="mono">' + (rec.item.name || 'unnamed') + '</td>' +
-					'<td class="mono">' + rec.source + '</td>' +
-					'<td class="mono">' + configSummary(cfg) + '</td>' +
-					'<td class="mono">' + savedAt + '</td>' +
-					'<td>' + actions + '</td>';
-
-				tr.querySelector('button[data-load]').addEventListener('click', function() {
+				for (const value of [rec.item.name || 'unnamed', rec.source, configSummary(cfg), savedAt]) {
+					tr.appendChild(uiElement('td', 'mono', value));
+				}
+				const actions = uiElement('td');
+				function action(label, className) {
+					const button = uiElement('button', className, label);
+					button.type = 'button';
+					actions.appendChild(button);
+					return button;
+				}
+				action('Load', 'ghost').addEventListener('click', function() {
 					applyFormConfig(cfg);
 					if (configStatusEl) {
 						configStatusEl.textContent = 'loaded config "' + (rec.item.name || 'unnamed') + '"';
 					}
 				});
 
-				tr.querySelector('button[data-start]').addEventListener('click', async function() {
+				action('Start', 'primary').addEventListener('click', async function() {
 					applyFormConfig(cfg);
 					if (startFormEl) {
 						skipRememberRecentOnce = true;
@@ -651,7 +712,7 @@ const frontendHTML = `<!doctype html>
 					}
 				});
 
-				tr.querySelector('button[data-delete]').addEventListener('click', async function() {
+				if (rec.source !== 'global') action('Delete', 'danger').addEventListener('click', async function() {
 					try {
 						if (rec.source === 'saved' || rec.source === 'global') {
 							await deleteConfigFromServer(rec.item.id);
@@ -670,6 +731,7 @@ const frontendHTML = `<!doctype html>
 					}
 				});
 
+				tr.appendChild(actions);
 				configRowsEl.appendChild(tr);
 			}
 		}
@@ -680,7 +742,8 @@ const frontendHTML = `<!doctype html>
 			configPanelContentEl.style.display = isVisible ? '' : 'none';
 		}
 		if (configToggleEl) {
-			configToggleEl.textContent = isVisible ? 'Hide Saved Configurations' : 'Show Saved Configurations';
+			configToggleEl.textContent = isVisible ? 'Hide configurations' : 'Show configurations';
+			configToggleEl.setAttribute('aria-expanded', String(isVisible));
 			configToggleEl.classList.toggle('toggle-on', isVisible);
 			configToggleEl.classList.toggle('toggle-off', !isVisible);
 		}
@@ -756,7 +819,7 @@ const frontendHTML = `<!doctype html>
 			const dark = theme === 'dark';
 			document.body.classList.toggle('dark', dark);
 			if (themeToggleEl) {
-				themeToggleEl.textContent = dark ? 'Switch To Light Mode' : 'Switch To Dark Mode';
+				themeToggleEl.textContent = dark ? 'Light mode' : 'Dark mode';
 			}
 		}
 
@@ -952,12 +1015,13 @@ const frontendHTML = `<!doctype html>
 		function createStatsHistory() {
 			const samples = [];
 			let previousDisks = new Map();
+			let previousNICs = new Map();
 			const number = value => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : 0;
 			function empty(label) {
-				return {label: label, cpu: null, memory: null, read: null, write: null, iops: null, errors: null, pending: 0, latency: null, latencyNS: 0, latencyOps: 0};
+				return {label: label, cpu: null, memory: null, read: null, write: null, iops: null, errors: null, rx: null, tx: null, rxPackets: null, txPackets: null, pending: 0, latency: null, latencyNS: 0, latencyOps: 0};
 			}
 			function merge(target, disk) {
-				for (const key of ['read', 'write', 'iops', 'errors']) {
+				for (const key of ['read', 'write', 'iops', 'errors', 'rx', 'tx', 'rxPackets', 'txPackets']) {
 					if (disk[key] !== null) target[key] = (target[key] || 0) + disk[key];
 				}
 				target.pending += disk.pending;
@@ -975,6 +1039,7 @@ const frontendHTML = `<!doctype html>
 				all.memory = number(daemon.heap_alloc_bytes);
 				series.set('all', all);
 				const nextDisks = new Map();
+				const nextNICs = new Map();
 				for (const vm of Array.isArray(vms) ? vms : []) {
 					const vmKey = 'vm:' + vm.uid;
 					const total = empty('VM ' + vm.uid);
@@ -982,6 +1047,25 @@ const frontendHTML = `<!doctype html>
 					total.memory = number(vm.host_mem_bytes);
 					all.cpu += total.cpu;
 					series.set(vmKey, total);
+					(Array.isArray(vm.nics) ? vm.nics : []).forEach(function(nic, index) {
+						if (!nic) return;
+						const key = vmKey + ':nic:' + index;
+						const identity = JSON.stringify([vm.uid, vm.started_at, index, nic.name, nic.mode]);
+						const old = previousNICs.get(identity);
+						const point = empty('VM ' + vm.uid + ' / NIC ' + (index + 1) + ' · ' + (nic.name || 'unnamed') + ' (' + (nic.mode || 'unknown') + ')');
+						point.pending = null;
+						const seconds = old ? (at - old.at) / 1000 : 0;
+						const fields = {rx: 'rx_bytes', tx: 'tx_bytes', rxPackets: 'rx_packets', txPackets: 'tx_packets'};
+						const valid = old && seconds > 0 && Object.values(fields).every(field =>
+							Number.isFinite(nic[field]) && Number.isFinite(old.nic[field]) && old.nic[field] >= 0 && nic[field] >= old.nic[field]);
+						if (valid) {
+							for (const [metric, field] of Object.entries(fields)) point[metric] = (nic[field] - old.nic[field]) / seconds;
+						}
+						nextNICs.set(identity, {at: at, nic: Object.assign({}, nic)});
+						series.set(key, point);
+						merge(total, point);
+						merge(all, point);
+					});
 					(Array.isArray(vm.storage) ? vm.storage : []).forEach(function(disk, index) {
 						if (!disk) return;
 						const key = vmKey + ':disk:' + index;
@@ -1009,6 +1093,7 @@ const frontendHTML = `<!doctype html>
 					});
 				}
 				previousDisks = nextDisks;
+				previousNICs = nextNICs;
 				samples.push({at: at, series: series});
 				while (samples.length > 720 || (samples.length && at - samples[0].at > 3600000)) samples.shift();
 			}
@@ -1024,6 +1109,8 @@ const frontendHTML = `<!doctype html>
 			latency: {title: 'Storage average latency', keys: ['latency'], labels: ['Average latency'], format: value => value.toFixed(2) + ' ms'},
 			pending: {title: 'Storage pending requests', keys: ['pending'], labels: ['Pending requests'], format: value => value.toFixed(0)},
 			errors: {title: 'Storage errors / second', keys: ['errors'], labels: ['Failed requests'], format: value => value.toFixed(2) + '/s'},
+			network: {title: 'Network throughput', keys: ['rx', 'tx'], labels: ['Receive (RX)', 'Transmit (TX)'], format: value => fmtBytes(value) + '/s'},
+			packets: {title: 'Network packet rate', keys: ['rxPackets', 'txPackets'], labels: ['Receive (RX)', 'Transmit (TX)'], format: value => value.toFixed(1) + ' packets/s'},
 			cpu: {title: 'VM host CPU', keys: ['cpu'], labels: ['Host CPU'], format: value => value.toFixed(1) + '%'},
 			memory: {title: 'Memory', keys: ['memory'], labels: ['Memory'], format: value => fmtBytes(value)}
 		};
@@ -1144,6 +1231,7 @@ const frontendHTML = `<!doctype html>
 		}
 
     async function stopVM(uid) {
+			if (!window.confirm('Stop virtual machine ' + uid + '? Any unsaved guest work may be lost.')) return;
       statusEl.textContent = 'stopping ' + uid + '...';
       await api('/api/v1/vms/stop?uid=' + encodeURIComponent(uid), { method: 'POST' });
       statusEl.textContent = 'stopped ' + uid;
@@ -1186,51 +1274,178 @@ const frontendHTML = `<!doctype html>
       await refresh();
     }
 
-    function showRows(vms) {
-      rows.innerHTML = '';
-			const present = new Set((Array.isArray(vms) ? vms : []).map(vm => vm.uid));
-			for (const uid of storageSamples.keys()) {
-				if (!present.has(uid)) storageSamples.delete(uid);
+		let dashboardVMs = [];
+		const expandedVMs = new Set();
+
+		function uiElement(tag, className, text) {
+			const element = document.createElement(tag);
+			if (className) element.className = className;
+			if (text !== undefined) element.textContent = String(text);
+			return element;
+		}
+
+		function revealPanel(id) {
+			const panel = document.getElementById(id);
+			if (!panel) return;
+			if (panel.tagName === 'DETAILS') panel.open = true;
+			if (id === 'saved-configurations') setSavedConfigsVisible(true);
+			panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+			const target = panel.querySelector('summary, input, button, select');
+			if (target) target.focus({preventScroll: true});
+		}
+
+		function renderVMStatistics() {
+			const select = document.getElementById('statistics-vm');
+			const container = document.getElementById('vm-statistics');
+			container.textContent = '';
+			const vm = dashboardVMs.find(item => item.uid === select.value);
+			if (!vm) {
+				container.appendChild(uiElement('p', 'section-note', 'Choose a VM to explore CPU, memory, network, and disk activity.'));
+				return;
 			}
-      if (!Array.isArray(vms) || vms.length === 0) {
-				rows.innerHTML = '<tr><td colspan="12" class="mono">No virtual machines are currently registered.</td></tr>';
-        return;
-      }
-      for (const vm of vms) {
-        const tr = document.createElement('tr');
-        const cls = vm.state === 'running' ? 'running' : 'stopped';
-        const guestMem = fmtBytes((Number(vm.mem_mib || 0) || 0) * 1024 * 1024);
-        const hostMem = fmtBytes(Number(vm.host_mem_bytes || 0));
-        tr.innerHTML = '<td class="mono">' + vm.uid + '</td>' +
-          '<td><span class="state ' + cls + '">' + vm.state + '</span></td>' +
-          '<td class="mono">' + fmtUptime(vm.uptime_sec) + '</td>' +
-          '<td class="mono">' + guestMem + '</td>' +
-          '<td class="mono">' + (vm.num_cpu || 0) + '</td>' +
-          '<td class="mono">' + Number(vm.host_cpu_pct || 0).toFixed(1) + '% (' + Number(vm.host_cpu_sec || 0).toFixed(2) + 's)</td>' +
-          '<td class="mono">' + hostMem + '</td>' +
-          '<td class="mono">' + bootLabel(vm) + '</td>' +
-		  '<td class="mono">' + networkLabel(vm) + '</td>' +
-				'<td class="mono">' + nicStatsLabel(vm) + '</td>' +
-				'<td class="mono" data-storage="1"></td>' +
-          '<td><button class="warn" data-stop="1" data-uid="' + vm.uid + '">Stop</button> ' +
-          '<button class="ghost" data-pause="1" data-uid="' + vm.uid + '">Pause</button> ' +
-          '<button class="ghost" data-resume="1" data-uid="' + vm.uid + '">Resume</button> ' +
-          '<button class="ghost" data-save="1" data-uid="' + vm.uid + '">Save</button> ' +
-          '<button class="ghost" data-restore="1" data-uid="' + vm.uid + '">Restore</button> ' +
-          '<button class="ghost" data-console="1" data-uid="' + vm.uid + '">Console</button></td>';
-				tr.querySelector('[data-storage]').appendChild(storageStatsView(vm));
-				tr.querySelector('button[data-stop]').addEventListener('click', () => stopVM(vm.uid).catch(err => statusEl.textContent = err.message));
-        tr.querySelector('button[data-pause]').addEventListener('click', () => pauseVM(vm.uid).catch(err => statusEl.textContent = err.message));
-        tr.querySelector('button[data-resume]').addEventListener('click', () => resumeVM(vm.uid).catch(err => statusEl.textContent = err.message));
-        tr.querySelector('button[data-save]').addEventListener('click', () => saveVM(vm.uid).catch(err => statusEl.textContent = err.message));
-        tr.querySelector('button[data-restore]').addEventListener('click', () => restoreVM(vm.uid).catch(err => statusEl.textContent = err.message));
-        tr.querySelector('button[data-console]').addEventListener('click', () => {
-          consoleUID.value = vm.uid;
-          openConsole().catch(err => consoleStatus.textContent = err.message);
-        });
-        rows.appendChild(tr);
-      }
-    }
+			function section(title) {
+				const node = uiElement('section', 'metric-section');
+				node.appendChild(uiElement('h3', '', title));
+				container.appendChild(node);
+				return node;
+			}
+			const resources = section('Host resources');
+			resources.appendChild(uiElement('p', 'mono', 'CPU ' + Number(vm.host_cpu_pct || 0).toFixed(1) + '% · ' + Number(vm.host_cpu_sec || 0).toFixed(2) + ' CPU seconds'));
+			resources.appendChild(uiElement('p', 'mono', 'Assigned memory ' + fmtBytes(vm.host_mem_bytes)));
+			resources.appendChild(uiElement('p', 'mono', 'Uptime ' + fmtUptime(vm.uptime_sec)));
+			const network = section('Network activity');
+			const nics = Array.isArray(vm.nics) ? vm.nics : [];
+			if (!nics.length) network.appendChild(uiElement('p', '', 'No network counters available.'));
+			for (const nic of nics) {
+				if (!nic) continue;
+				network.appendChild(uiElement('p', 'mono', (nic.name || 'NIC') + ' · ' + (nic.mode || 'unknown')));
+				network.appendChild(uiElement('p', 'mono', 'RX ' + fmtBytes(nic.rx_bytes) + ' / ' + (nic.rx_packets || 0) + ' packets'));
+				network.appendChild(uiElement('p', 'mono', 'TX ' + fmtBytes(nic.tx_bytes) + ' / ' + (nic.tx_packets || 0) + ' packets'));
+			}
+			const storage = section('Storage activity');
+			storage.appendChild(storageStatsView(vm));
+		}
+
+		function updateVMStatisticsOptions() {
+			const select = document.getElementById('statistics-vm');
+			const selected = select.value;
+			select.textContent = '';
+			const placeholder = uiElement('option', '', 'Select a VM for detailed statistics');
+			placeholder.value = '';
+			select.appendChild(placeholder);
+			for (const vm of dashboardVMs) {
+				const option = uiElement('option', '', vm.uid + ' · ' + vm.state);
+				option.value = vm.uid;
+				select.appendChild(option);
+			}
+			select.value = dashboardVMs.some(vm => vm.uid === selected) ? selected : '';
+		}
+
+		function openVMStatistics(uid) {
+			revealPanel('statistics-panel');
+			document.getElementById('statistics-vm').value = uid;
+			renderVMStatistics();
+			const source = document.getElementById('stats-history-source');
+			if (Array.from(source.options).some(option => option.value === 'vm:' + uid)) source.value = 'vm:' + uid;
+			setStatsHistoryVisible(true);
+		}
+
+		function createVMCard(vm) {
+			const card = uiElement('article', 'vm-card');
+			const heading = uiElement('div', 'card-heading');
+			heading.appendChild(uiElement('h3', 'mono', vm.uid));
+			heading.appendChild(uiElement('span', 'state ' + (vm.state === 'running' ? 'running' : 'stopped'), vm.state || 'unknown'));
+			card.appendChild(heading);
+			const resources = uiElement('div', 'vm-resources');
+			for (const label of [(vm.num_cpu || 0) + ' vCPU', fmtBytes(Number(vm.mem_mib || 0) * 1024 * 1024) + ' RAM', fmtUptime(vm.uptime_sec)]) {
+				resources.appendChild(uiElement('span', '', label));
+			}
+			card.appendChild(resources);
+			card.appendChild(uiElement('div', 'vm-network', vm.nat_guest_ip ? 'Guest IP · ' + vm.nat_guest_ip : (vm.tap ? 'Network · ' + vm.tap : 'No network attached')));
+			const actions = uiElement('div', 'actions');
+			function button(parent, label, name, callback, className) {
+				const node = uiElement('button', className || 'ghost', label);
+				node.type = 'button';
+				node.setAttribute('data-vm', vm.uid);
+				node.setAttribute('data-action', name);
+				node.setAttribute('aria-label', label + ' · ' + vm.uid);
+				node.addEventListener('click', () => Promise.resolve().then(callback).catch(err => statusEl.textContent = err.message));
+				parent.appendChild(node);
+				return node;
+			}
+			button(actions, 'Console', 'console', () => { consoleUID.value = vm.uid; return openConsole(); }, 'primary');
+			button(actions, 'Statistics', 'statistics', () => openVMStatistics(vm.uid));
+			card.appendChild(actions);
+			const more = uiElement('details', 'vm-more');
+			more.open = expandedVMs.has(vm.uid);
+			const moreSummary = uiElement('summary', '', 'Details & actions');
+			moreSummary.setAttribute('data-vm', vm.uid);
+			moreSummary.setAttribute('data-action', 'details');
+			more.appendChild(moreSummary);
+			more.addEventListener('toggle', () => more.open ? expandedVMs.add(vm.uid) : expandedVMs.delete(vm.uid));
+			const details = uiElement('dl');
+			for (const [label, value] of [['Boot image', bootLabel(vm)], ['Networking', networkLabel(vm)], ['Disks', blockValueToList(vm.block).join(', ') || vm.iso || 'None'], ['Last error', vm.last_error || 'None']]) {
+				details.appendChild(uiElement('dt', '', label));
+				details.appendChild(uiElement('dd', 'mono', value));
+			}
+			more.appendChild(details);
+			const extra = uiElement('div', 'actions');
+			button(extra, 'Pause', 'pause', () => pauseVM(vm.uid));
+			button(extra, 'Resume', 'resume', () => resumeVM(vm.uid));
+			button(extra, 'Save snapshot', 'save', () => saveVM(vm.uid));
+			button(extra, 'Restore snapshot', 'restore', () => restoreVM(vm.uid));
+			button(extra, 'Stop VM', 'stop', () => stopVM(vm.uid), 'danger');
+			more.appendChild(extra);
+			card.appendChild(more);
+			return card;
+		}
+
+		function showRows(vms) {
+			dashboardVMs = Array.isArray(vms) ? vms : [];
+			const active = document.activeElement;
+			const focusVM = active && active.getAttribute('data-vm');
+			const focusAction = active && active.getAttribute('data-action');
+			rows.textContent = '';
+			const present = new Set(dashboardVMs.map(vm => vm.uid));
+			for (const uid of storageSamples.keys()) if (!present.has(uid)) storageSamples.delete(uid);
+			for (const uid of expandedVMs) if (!present.has(uid)) expandedVMs.delete(uid);
+			if (!dashboardVMs.length) {
+				const empty = uiElement('div', 'empty-state');
+				empty.appendChild(uiElement('strong', '', 'Your next machine starts here'));
+				empty.appendChild(uiElement('p', '', 'Create a new virtual machine or reuse a configuration from your library.'));
+				const create = uiElement('button', 'primary', '+ Create a VM');
+				create.type = 'button';
+				create.addEventListener('click', () => revealPanel('launch-panel'));
+				empty.appendChild(create);
+				rows.appendChild(empty);
+			}
+			for (const vm of dashboardVMs) rows.appendChild(createVMCard(vm));
+			if (focusVM && focusAction) {
+				for (const button of rows.querySelectorAll('[data-vm]')) {
+					if (button.getAttribute('data-vm') === focusVM && button.getAttribute('data-action') === focusAction) button.focus({preventScroll: true});
+				}
+			}
+			updateVMStatisticsOptions();
+		}
+
+		function initWorkspace() {
+			for (const button of document.querySelectorAll('[data-reveal]')) {
+				button.addEventListener('click', () => revealPanel(button.getAttribute('data-reveal')));
+			}
+			document.getElementById('statistics-vm').addEventListener('change', function() {
+				renderVMStatistics();
+				const source = document.getElementById('stats-history-source');
+				const key = this.value ? 'vm:' + this.value : 'all';
+				if (Array.from(source.options).some(option => option.value === key)) source.value = key;
+				renderStatsHistory();
+			});
+			document.getElementById('statistics-panel').addEventListener('toggle', function() {
+				if (this.open) {
+					renderVMStatistics();
+					renderStatsHistory();
+				}
+			});
+		}
 
     async function refresh() {
       const body = await api('/api/v1/vms');
@@ -1238,6 +1453,9 @@ const frontendHTML = `<!doctype html>
 			updateHistorySources();
       showCards(body.daemon || {});
       showRows(body.vms || []);
+			const count = dashboardVMs.filter(vm => vm.state === 'running').length;
+			document.getElementById('fleet-summary').textContent = count + ' running · ' + dashboardVMs.length + ' machines · Updated ' + new Date().toLocaleTimeString();
+			if (document.getElementById('statistics-panel').open) renderVMStatistics();
 			renderStatsHistory();
     }
 
@@ -1957,7 +2175,7 @@ const refreshBtn = document.getElementById('refresh');
 				const currentlyVisible = !configPanelContentEl || configPanelContentEl.style.display !== 'none';
 				setSavedConfigsVisible(!currentlyVisible);
 			});
-			setSavedConfigsVisible(localStorage.getItem(savedConfigVisibilityKey) !== '0');
+			setSavedConfigsVisible(localStorage.getItem(savedConfigVisibilityKey) === '1');
 		}
 
 		async function refreshGlobalConfigs() {
@@ -1967,6 +2185,7 @@ const refreshBtn = document.getElementById('refresh');
 
 		initTheme();
 		initStatsHistory();
+		initWorkspace();
 		ensureTerminal();
 		refreshBaseDiskOptions().catch(() => {});
 		refreshGlobalConfigs().catch(() => {});

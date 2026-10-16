@@ -52,7 +52,7 @@ func (m *BlockMetrics) Snapshot() BlockStats {
 		ReadOps: m.readOps.Load(), WriteOps: m.writeOps.Load(), FlushOps: m.flushOps.Load(),
 		ReadBytes: m.readBytes.Load(), WriteBytes: m.writeBytes.Load(), Errors: m.errors.Load(),
 		CompletedOps: m.completedOps.Load(),
-		InFlight: m.inFlight.Load(), IOTimeNS: m.ioTimeNS.Load(), MaxIOTimeNS: m.maxIOTimeNS.Load(),
+		InFlight:     m.inFlight.Load(), IOTimeNS: m.ioTimeNS.Load(), MaxIOTimeNS: m.maxIOTimeNS.Load(),
 	}
 }
 

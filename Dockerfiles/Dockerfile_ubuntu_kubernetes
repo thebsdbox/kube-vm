@@ -34,5 +34,17 @@ version = 2
 EOF
 RUN sudo systemctl enable containerd
 RUN curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/v0.20.1/cilium-linux-amd64.tar.gz; tar -xvzf cilium-linux-amd64.tar.gz; rm cilium-linux-amd64.tar.gz; mv cilium /usr/bin/
-
+RUN <<EOF cat >> /home/ubuntu/kubernetes.sh
+#!/bin/bash
+echo "Deploying Kubernetes"
+sudo kubeadm config images pull
+echo "Images downloaded, starting kubeadm init, in 3 seconds"
+sleep 3
+sudo kubeadm init --pod-network-cidr 10.244.0.0/16 --ignore-preflight-errors=SystemVerification
+mkdir -p /home/ubuntu/.kube
+sudo cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+EOF
+RUN chmod +x /home/ubuntu/kubernetes.sh
 CMD ["/lib/systemd/systemd"]
