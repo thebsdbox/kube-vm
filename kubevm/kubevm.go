@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -250,12 +251,43 @@ func (s *vmServer) List() []control.VMSummary {
 			UID:       snap.UID,
 			State:     snap.State,
 			IPAddress: snap.NATGuestIP,
+			UptimeSec: snap.UptimeSec,
+			BaseDisk:  baseDiskFromBlockSpecs(snap.Block),
 		})
 	}
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].UID < summaries[j].UID
 	})
 	return summaries
+}
+
+// Prefer an overlay's base image; otherwise report the first file-backed disk.
+func baseDiskFromBlockSpecs(blocks []string) string {
+	var fallback string
+	for _, spec := range blocks {
+		u, err := url.Parse(strings.TrimSpace(spec))
+		if err != nil {
+			continue
+		}
+		path := u.Path
+		if path == "" {
+			path = u.Opaque
+		}
+		if u.Scheme == "cow" || u.Query().Get("overlay") != "" {
+			if path != "" {
+				return path
+			}
+		}
+		if fallback == "" {
+			switch u.Scheme {
+			case "", "file":
+				fallback = path
+			case "http", "https":
+				fallback = u.Redacted()
+			}
+		}
+	}
+	return fallback
 }
 
 func (s *vmServer) Examine(uid string) (control.VMDetails, error) {

@@ -76,6 +76,8 @@ type VMSummary struct {
 	UID       string `json:"uid"`
 	State     string `json:"state"`
 	IPAddress string `json:"ip_address,omitempty"`
+	UptimeSec int64  `json:"uptime_sec,omitempty"`
+	BaseDisk  string `json:"base_disk,omitempty"`
 }
 
 type VMNIC struct {

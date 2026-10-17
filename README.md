@@ -149,6 +149,14 @@ KUBEVM_SSH_IGNORE_HOST_KEY=1 KUBEVM_SSH_PASSWORD=secret ./kube-vmctl ssh -l root
 ./kube-vmctl shutdown -uid abc123
 ```
 
+Existing-VM commands (`stop`, `pause`, `resume`, `status`, `examine`, `console`,
+`ssh`, `save`, and `restore`) accept a full UID or a unique leading prefix,
+either positionally or through `--uid` where supported. For example,
+`kube-vmctl stop f` targets the only VM whose UID begins with `f`. If several
+UIDs match, the command lists the matches and refuses to act until more
+characters are supplied. An exact UID always wins over longer prefix matches.
+New UIDs supplied to `start` or template launch commands are used literally.
+
 Start-time flags accepted by `kube-vmctl`:
 
 - `-uid` fixed VM UID (optional)

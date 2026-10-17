@@ -64,6 +64,9 @@ func TestResolveSSHTargetResolvesUIDToGuestIP(t *testing.T) {
 		if socketPath != "/tmp/kube-vm.sock" {
 			t.Fatalf("socketPath = %q, want %q", socketPath, "/tmp/kube-vm.sock")
 		}
+		if action == "list" {
+			return control.Response{OK: true, VMs: []control.VMSummary{{UID: "vm-123"}}}, nil
+		}
 		if action != "examine" {
 			t.Fatalf("action = %q, want %q", action, "examine")
 		}
@@ -86,6 +89,9 @@ func TestResolveSSHTargetResolvesUIDToGuestIP(t *testing.T) {
 func TestResolveSSHTargetRequiresGuestIPForUID(t *testing.T) {
 	oldDial := controlDial
 	controlDial = func(socketPath, action string, payload map[string]any) (control.Response, error) {
+		if action == "list" {
+			return control.Response{OK: true, VMs: []control.VMSummary{{UID: "vm-123"}}}, nil
+		}
 		return control.Response{OK: true, VM: &control.VMDetails{}}, nil
 	}
 	defer func() { controlDial = oldDial }()
@@ -100,6 +106,9 @@ func TestSSHCommandBuildsInvocation(t *testing.T) {
 	oldDial := controlDial
 	oldRunner := sshCommandRunner
 	controlDial = func(socketPath, action string, payload map[string]any) (control.Response, error) {
+		if action == "list" {
+			return control.Response{OK: true, VMs: []control.VMSummary{{UID: "vm-123"}}}, nil
+		}
 		return control.Response{OK: true, VM: &control.VMDetails{NATGuestIP: "10.0.2.15"}}, nil
 	}
 	var gotInvocation sshInvocation

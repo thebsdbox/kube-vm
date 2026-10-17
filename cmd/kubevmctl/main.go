@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -83,7 +84,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&socketPath, "socket", "s", defaultSocketPath(), "path to the kube-vm control socket")
-	rootCmd.PersistentFlags().StringVarP(&uid, "uid", "u", "", "VM UID to target")
+	rootCmd.PersistentFlags().StringVarP(&uid, "uid", "u", "", "VM UID or unique prefix to target (start uses the literal UID)")
 
 	rootCmd.AddCommand(newListCmd())
 	rootCmd.AddCommand(newExamineCmd())
@@ -540,18 +541,28 @@ func newListCmd() *cobra.Command {
 				return fmt.Errorf("control request failed")
 			}
 			if len(resp.VMs) == 0 {
-				fmt.Println("no running VMs")
+				fmt.Fprintln(cmd.OutOrStdout(), "no running VMs")
 				return nil
 			}
-			fmt.Println("UID\tSTATE\tIP")
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "UID\tSTATE\tIP\tUPTIME\tBASE DISK")
 			for _, vm := range resp.VMs {
 				ip := vm.IPAddress
 				if ip == "" {
 					ip = "-"
 				}
-				fmt.Printf("%s\t%s\t%s\n", vm.UID, vm.State, ip)
+				baseDisk := vm.BaseDisk
+				if baseDisk == "" {
+					baseDisk = "-"
+				}
+				uptime := vm.UptimeSec
+				if uptime < 0 {
+					uptime = 0
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", vm.UID, vm.State, ip,
+					(time.Duration(uptime)*time.Second).String(), baseDisk)
 			}
-			return nil
+			return w.Flush()
 		},
 	}
 	return cmd
@@ -570,7 +581,7 @@ func newExamineCmd() *cobra.Command {
 			if uid == "" {
 				return fmt.Errorf("uid is required")
 			}
-			resp, err := controlDial(socketPath, "examine", map[string]any{"uid": uid})
+			resp, err := dialVM(socketPath, "examine", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -644,7 +655,7 @@ func newStatusCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := controlDial(socketPath, "status", map[string]any{"uid": uid})
+			resp, err := dialVM(socketPath, "status", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -755,7 +766,7 @@ func newPauseCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := controlDial(socketPath, "pause", map[string]any{"uid": uid})
+			resp, err := dialVM(socketPath, "pause", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -781,7 +792,7 @@ func newResumeCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := controlDial(socketPath, "resume", map[string]any{"uid": uid})
+			resp, err := dialVM(socketPath, "resume", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -809,10 +820,6 @@ func newConsoleCmd() *cobra.Command {
 			}
 			if uid == "" {
 				return fmt.Errorf("uid is required")
-			}
-			_, err := controlDial(socketPath, "connect", map[string]any{"uid": uid})
-			if err != nil {
-				return err
 			}
 			return attachConsole(socketPath, uid)
 		},
@@ -856,7 +863,7 @@ func newStopCmd() *cobra.Command {
 			if len(args) > 0 {
 				uid = args[0]
 			}
-			resp, err := controlDial(socketPath, "shutdown", map[string]any{"uid": uid})
+			resp, err := dialVM(socketPath, "shutdown", map[string]any{"uid": uid})
 			if err != nil {
 				return err
 			}
@@ -886,7 +893,7 @@ func newSaveCmd() *cobra.Command {
 			if err != nil || path == "" {
 				return fmt.Errorf("save requires --path")
 			}
-			resp, err := controlDial(socketPath, "save", map[string]any{"uid": uid, "path": path})
+			resp, err := dialVM(socketPath, "save", map[string]any{"uid": uid, "path": path})
 			if err != nil {
 				return err
 			}
@@ -917,7 +924,7 @@ func newRestoreCmd() *cobra.Command {
 			if err != nil || path == "" {
 				return fmt.Errorf("restore requires --path")
 			}
-			resp, err := controlDial(socketPath, "restore", map[string]any{"uid": uid, "path": path})
+			resp, err := dialVM(socketPath, "restore", map[string]any{"uid": uid, "path": path})
 			if err != nil {
 				return err
 			}
@@ -950,7 +957,7 @@ func resolveSSHTarget(socketPath, target, user string) (string, error) {
 
 	host := target
 	if ip := net.ParseIP(target); ip == nil {
-		resp, err := controlDial(socketPath, "examine", map[string]any{"uid": target})
+		resp, err := dialVM(socketPath, "examine", map[string]any{"uid": target})
 		if err != nil {
 			return "", err
 		}
@@ -1344,9 +1351,17 @@ func attachConsole(socketPath, uid string) error {
 	if uid == "" {
 		return fmt.Errorf("uid is required to attach to a VM")
 	}
-	if _, err := controlDial(socketPath, "connect", map[string]any{"uid": uid}); err != nil {
+	resp, err := dialVM(socketPath, "connect", map[string]any{"uid": uid})
+	if err != nil {
 		return err
 	}
+	if !resp.OK {
+		if resp.Error != "" {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		return fmt.Errorf("control request failed")
+	}
+	uid = resp.UID
 
 	consolePath := socketPath + "." + uid + ".console"
 	conn, err := net.DialTimeout("unix", consolePath, 2*time.Second)
